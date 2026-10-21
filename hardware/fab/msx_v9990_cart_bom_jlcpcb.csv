@@ -1,0 +1,12 @@
+Comment,Designator,Footprint,MPN,LCSC Part #,Qty,Note
+100n,"C1,C2,C3,C4,C5",C_0805_2012Metric,CL21B104KBCNNNC,,5,
+10u,"C6,C7",C_0805_2012Metric,CL21A106KAYNNNE,,2,
+B5819W,D1,D_SOD-123,B5819W,,1,
+HDMI_A,J2,HDMI_A_Amphenol_10029449-x01xLF_Horizontal,10029449-001RLF,,1,Check that the purchased HDMI receptacle matches this footprint
+Pimoroni Pico Plus 2,M1,RaspberryPi_Pico_Common_THT,,,1,Hand-mounted module on 2x20 pin headers - not assembled by JLCPCB
+270,"R1,R2,R3,R4,R5,R6,R7,R8",R_0603_1608Metric,0603WAF2700T5E,,8,
+10k,R9,R_0805_2012Metric,0805W8F1002T5E,,1,
+74LVC245,"U1,U2",SOIC-20W_7.5x12.8mm_P1.27mm,SN74LVC245ADWR,,2,
+74HCT688,U3,SOIC-20W_7.5x12.8mm_P1.27mm,74HCT688D,,1,
+74LVC07,U4,SOIC-14_3.9x8.7mm_P1.27mm,SN74LVC07AD,,1,
+74HCT32,U5,SOIC-14_3.9x8.7mm_P1.27mm,74HCT32D,,1,

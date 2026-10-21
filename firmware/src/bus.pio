@@ -1,0 +1,56 @@
+;
+; V9990 MSX bus interface (I/O ports 0x60-0x6F).
+;
+; Pin layout (board_pins.h):
+;   in_base  = GPIO0 : A0-A3 at 0-3, D0-D7 at 4-11
+;   out_base = GPIO4 : D0-D7
+;   PIN_CS   : decoded /CS (active low), already excludes /M1 cycles
+;   jmp_pin  : /RD
+;
+; Two state machines watch the same /CS:
+;   v9990_bus_monitor : reports every access to core1 (via DMA ring buffer)
+;   v9990_bus_read    : answers reads from a 16-entry response table (via DMA)
+;
+
+.program v9990_bus_monitor
+.define PUBLIC PIN_CS 20
+; RX word: bit0 = 1 for read, bits 1-4 = port, bits 5-12 = data (writes)
+; ISR shifts left, no autopush.
+.wrap_target
+    wait 1 gpio PIN_CS
+    wait 0 gpio PIN_CS [15]     ; let /RD and the data bus settle (~60ns @252MHz)
+    in pins, 12
+    jmp pin is_write            ; /RD high -> write cycle
+    set x, 1
+    jmp emit
+is_write:
+    set x, 0
+emit:
+    in x, 1
+    push noblock
+.wrap
+
+
+.program v9990_bus_read
+.define PUBLIC PIN_CS 20
+; X = response_table_address >> 6 (table is 16 words, 64-byte aligned).
+; The pushed word is the address of the response word for this port; a DMA
+; channel reads that word and puts it in the TX FIFO.
+; ISR shifts left, OSR shifts right, no autopush/autopull.
+.wrap_target
+idle:
+    mov isr, x
+    wait 1 gpio PIN_CS
+    wait 0 gpio PIN_CS [3]
+    jmp pin idle                ; /RD high -> write cycle, not ours
+    in pins, 4                  ; port number
+    in null, 2                  ; * 4 bytes
+    push block
+    pull block                  ; response byte from the table
+    out pins, 8
+    mov osr, ~null
+    out pindirs, 8              ; drive D0-D7
+    wait 1 gpio PIN_CS
+    mov osr, null
+    out pindirs, 8              ; release the bus
+.wrap

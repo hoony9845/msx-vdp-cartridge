@@ -1,0 +1,8 @@
+build-*/
+*.ppm
+hardware/msx_v9990_cart/route.*
+hardware/msx_v9990_cart/*.net
+hardware/msx_v9990_cart/*-backups/
+hardware/msx_v9990_cart/fp-info-cache
+hardware/msx_v9990_cart/*.kicad_prl
+hardware/gen/__pycache__/
