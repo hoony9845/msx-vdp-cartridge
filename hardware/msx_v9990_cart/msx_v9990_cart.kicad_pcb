@@ -2137,7 +2137,7 @@
 		(descr "SOD-123")
 		(tags "SOD-123")
 		(property "Reference" "D1"
-			(at 0 -2 0)
+			(at -3.6 0 0)
 			(layer "F.SilkS")
 			(uuid "a71c22ab-d06e-4370-9de9-06a4634d9348")
 			(effects
@@ -3243,6 +3243,7 @@
 			(at 0 -7.1 180)
 			(unlocked yes)
 			(layer "F.SilkS")
+			(hide yes)
 			(uuid "f0367fe8-0e8f-4083-b4bd-6a5de98b8eac")
 			(effects
 				(font

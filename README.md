@@ -4,6 +4,7 @@ GFX9000 / PowerGraph 호환 카트리지를 실제 V9990 칩 없이 RP2350 하�
 MSX의 I/O 포트 0x60–0x6F를 받아 V9990처럼 동작하고, 화면은 HDMI(DVI 640×480@60)로 출력한다.
 
 - 프로토타입 보드: **Pimoroni Pico Plus 2** (RP2350B, 플래시 16MB, PSRAM 8MB)
+  또는 **Waveshare Core2350B1/B2** (`-DPICO_BOARD=waveshare_core2350b`)
 - 결선: [docs/hardware.md](docs/hardware.md)
 - 카트리지 PCB (KiCad 8, JLCPCB 주문용 거버 포함): [hardware/](hardware/README.md)
 

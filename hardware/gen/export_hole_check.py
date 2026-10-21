@@ -109,9 +109,15 @@ for label, x, y, dia, kind in holes:
         line((x, y - r), (x, y + r), 0.1)
         text(label, x + dia / 2 + 0.6, y - dia / 2 - 0.4, 1.5)
 pico = {h[0]: h for h in holes if h[0].startswith("M1.")}
-for pin in ("1", "20", "21", "40"):
+if design.VARIANT == "core2350b":
+    MODULE_PINS = {"1": "P1-1", "17": "P2-1", "33": "P3-1", "49": "P4-1"}
+    MODULE_NOTE = "M1: Core2350B, 64 holes on a 2.54 mm grid (four 2x8 headers)"
+else:
+    MODULE_PINS = {"1": "pin 1", "20": "pin 20", "21": "pin 21", "40": "pin 40"}
+    MODULE_NOTE = "M1: 40 holes, 2 rows x 20, pitch 2.54 mm, rows 17.78 mm apart"
+for pin, name in MODULE_PINS.items():
     _, x, y, _, _ = pico[f"M1.{pin}"]
-    text(f"M1 pin {pin}", x - 3.0, y + (2.6 if y > oy + bh / 2 - 10 else -1.6), 1.0)
+    text(f"M1 {name}", x - 2.5, y - 1.6, 1.0)
 
 # ---- rulers (check the printer scale!) -----------------------------------
 ry = oy + bh + 14
@@ -159,11 +165,11 @@ for h in holes:
 for h in holes:
     if h[0].startswith("J2."):
         row(h[0], h[1], h[2], h[3], "HDMI shield, " + h[4])
-for pin in ("1", "20", "21", "40"):
+for pin, name in MODULE_PINS.items():
     h = pico[f"M1.{pin}"]
-    row(h[0], h[1], h[2], h[3], "Pico header, " + h[4])
+    row(h[0], h[1], h[2], h[3], f"module {name}, " + h[4])
 ty += 1
-text("M1: 40 holes, 2 rows x 20, pitch 2.54 mm, rows 17.78 mm apart", tx, ty, 1.3)
+text(MODULE_NOTE, tx, ty, 1.3)
 ty += 2.6
 text("Vias (0.3 mm) are not shown.", tx, ty, 1.3)
 ty += 2.6

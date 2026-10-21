@@ -50,6 +50,33 @@ def gnd_fanout_points(board):
     out = []
     for fp in board.GetFootprints():
         ref = fp.GetReference()
+        if ref == "M1" and "Core2350B" in fp.GetFPIDAsString():
+            # Core2350B: holes on a 10x10 grid, outer two rings only.
+            # Corner GND pins fan out diagonally away from the module, GND pins
+            # of the inner ring step one grid inwards into the empty middle.
+            pads = list(fp.Pads())
+            cx = sum(p.GetPosition().x for p in pads) // len(pads)
+            cy = sum(p.GetPosition().y for p in pads) // len(pads)
+            g = MM(2.54)
+            for p in pads:
+                if p.GetNetname() != "GND":
+                    continue
+                pos = p.GetPosition()
+                c = round((pos.x - cx) / g + 4.5)
+                r = round((pos.y - cy) / g + 4.5)
+                sx = 1 if pos.x > cx else -1
+                sy = 1 if pos.y > cy else -1
+                if c in (0, 9) and r in (0, 9):
+                    via = pos + pcbnew.VECTOR2I(sx * MM(1.8), sy * MM(1.8))
+                elif c in (1, 8):
+                    via = pos - pcbnew.VECTOR2I(sx * g, 0)
+                elif r in (1, 8):
+                    via = pos - pcbnew.VECTOR2I(0, sy * g)
+                else:   # outer ring, not a corner
+                    via = pos + (pcbnew.VECTOR2I(sx * MM(2.0), 0) if c in (0, 9)
+                                 else pcbnew.VECTOR2I(0, sy * MM(2.0)))
+                out.append((pos, via))
+            continue
         if ref == "M1":
             # Pico GND pins: fan out towards the middle of the module so every
             # GND pin reaches the pours even when signal traces surround it

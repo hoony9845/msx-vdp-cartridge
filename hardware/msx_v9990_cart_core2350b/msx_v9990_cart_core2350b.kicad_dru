@@ -1,0 +1,8 @@
+(version 1)
+# A single thermal spoke is acceptable on this board (hand-soldered parts).
+(rule "thermal_spokes"
+  (constraint min_resolved_spokes 1))
+# The gold fingers run right up to the bottom board edge (bevelled at JLCPCB).
+(rule "gold_fingers_to_edge"
+  (condition "A.memberOfFootprint('J1')")
+  (constraint edge_clearance (min 0)))

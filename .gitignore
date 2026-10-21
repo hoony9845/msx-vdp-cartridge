@@ -6,3 +6,9 @@ hardware/msx_v9990_cart/*-backups/
 hardware/msx_v9990_cart/fp-info-cache
 hardware/msx_v9990_cart/*.kicad_prl
 hardware/gen/__pycache__/
+hardware/msx_v9990_cart_core2350b/route.*
+hardware/msx_v9990_cart_core2350b/*.net
+hardware/msx_v9990_cart_core2350b/*-backups/
+hardware/msx_v9990_cart_core2350b/fp-info-cache
+hardware/msx_v9990_cart_core2350b/*.kicad_prl
+*.lck

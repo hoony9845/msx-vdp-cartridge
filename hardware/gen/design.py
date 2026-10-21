@@ -6,7 +6,17 @@ the PCB always describe the same circuit (DRC checks schematic parity).
 See docs/hardware.md for the reasoning behind the circuit.
 """
 
-PROJECT = "msx_v9990_cart"
+import os
+
+# Which RP2350 module the cartridge carries:
+#   picoplus2 : Pimoroni Pico Plus 2 (Pico form factor, USB-C on the module)
+#   core2350b : Waveshare Core2350B (25.4mm square, 64 pins, PSRAM on the back:
+#               mount on pin headers). USB/BOOTSEL/RESET live on Waveshare's
+#               FFC USB adapter. Needs the B1 (2MB) or B2 (8MB) PSRAM version.
+VARIANT = os.environ.get("MSX_VARIANT", "picoplus2")
+assert VARIANT in ("picoplus2", "core2350b"), VARIANT
+
+PROJECT = "msx_v9990_cart" if VARIANT == "picoplus2" else "msx_v9990_cart_core2350b"
 LIB = "msx_v9990"          # project symbol / footprint library nickname
 
 # ---------------------------------------------------------------------------
@@ -159,6 +169,73 @@ comp("U4", f"{LIB}:74LVC07", "74LVC07", FP_SOIC14, "SN74LVC07AD", {
     "9": "+3V3", "11": "+3V3", "13": "+3V3",
     "7": "GND", "14": "+3V3"})
 
+# RP2350 GPIO -> net (= firmware/src/board_pins.h, identical for both modules)
+GPIO_NETS = {
+    0: "GP_A0", 1: "GP_A1", 2: "GP_A2", 3: "GP_A3",
+    4: "GP_D0", 5: "GP_D1", 6: "GP_D2", 7: "GP_D3",
+    8: "GP_D4", 9: "GP_D5", 10: "GP_D6", 11: "GP_D7",
+    12: "DVI_D0_P", 13: "DVI_D0_N", 14: "DVI_CK_P", 15: "DVI_CK_N",
+    16: "DVI_D2_P", 17: "DVI_D2_N", 18: "DVI_D1_P", 19: "DVI_D1_N",
+    20: "GP_CS_N", 21: "GP_RD_N", 22: "GP_WR_N",
+    26: "GP_RESET_N", 27: "GP_INT", 28: "GP_WAIT",
+}
+
+# Waveshare Core2350B: four 2x8 headers P1..P4 (schematic Core2350B.pdf),
+# numbered here as pads 1-16 (P1), 17-32 (P2), 33-48 (P3), 49-64 (P4).
+CORE_HEADERS = {
+    "P1": ["GND", "GP0", "GP2", "GP1", "GP4", "GP3", "GP6", "GP5",
+           "GP8", "GP7", "GP10", "GP9", "GP12", "GP11", "GP14", "GP13"],
+    "P2": ["GND", "GP45", "GP47", "GP46", "BOOTSEL", "SWD", "USBD_N", "GND",
+           "USBD_P", "SWCLK", "RUN", "ADC_VREF", "3V3_EN", "GND", "VBUS", "3V3"],
+    "P3": ["GND", "GP15", "GP17", "GP16", "GP19", "GP18", "GP21", "GP20",
+           "GP23", "GP22", "GP25", "GP24", "GP27", "GP26", "GP29", "GP28"],
+    "P4": ["GND", "GP30", "GP32", "GP31", "GP34", "GP33", "GP36", "GP35",
+           "GP38", "GP37", "GP40", "GP39", "GP42", "GP41", "GP44", "GP43"],
+}
+CORE_PADS = {}          # pad number -> signal name
+for h, (name, sigs) in enumerate(CORE_HEADERS.items()):
+    for i, sig in enumerate(sigs):
+        CORE_PADS[str(h * 16 + i + 1)] = sig
+
+
+def _core_type(sig):
+    if sig == "GND" or sig == "VBUS":
+        return PI
+    if sig == "3V3":
+        return PO
+    if sig in ("BOOTSEL", "RUN", "3V3_EN"):
+        return I
+    if sig in ("ADC_VREF",):
+        return P
+    return B
+
+
+SYMBOLS["Core2350B"] = (
+    "Waveshare Core2350B (RP2350B, 16MB flash, PSRAM on B1/B2), four 2x8 headers",
+    [(n, f"{sig}" if sig != "GND" else "GND", _core_type(sig)) for n, sig in
+     sorted(CORE_PADS.items(), key=lambda x: int(x[0])) if int(n) <= 32],
+    [(n, sig, _core_type(sig)) for n, sig in
+     sorted(CORE_PADS.items(), key=lambda x: int(x[0])) if int(n) > 32],
+)
+
+if VARIANT == "core2350b":
+    core = {}
+    for pad, sig in CORE_PADS.items():
+        if sig.startswith("GP") and int(sig[2:]) in GPIO_NETS:
+            core[pad] = GPIO_NETS[int(sig[2:])]
+        elif sig in ("GND", "VBUS"):
+            core[pad] = sig
+        elif sig == "3V3":
+            core[pad] = "+3V3"
+    comp("M1", f"{LIB}:Core2350B", "Waveshare Core2350B", f"{LIB}:Waveshare_Core2350B",
+         "Core2350B2", core)
+
+    # Power: MSX +5V -> module VBUS. USB (firmware upload) comes in through the
+    # module's FFC connector and Waveshare's USB adapter board, which also has
+    # the BOOTSEL/RESET buttons; D1 keeps USB power out of the MSX.
+    comp("D1", "Device:D_Schottky", "B5819W", "Diode_SMD:D_SOD-123", "B5819W",
+         {"1": "VBUS", "2": "+5V"})
+
 # M1: Pimoroni Pico Plus 2 (pin map = firmware/src/board_pins.h)
 pico = {
     "1": "GP_A0", "2": "GP_A1", "4": "GP_A2", "5": "GP_A3",
@@ -172,12 +249,13 @@ pico = {
 }
 for gnd in ("3", "8", "13", "18", "23", "28", "33", "38"):
     pico[gnd] = "GND"
-comp("M1", f"{LIB}:Pico_Plus_2", "Pimoroni Pico Plus 2",
-     "Module:RaspberryPi_Pico_Common_THT", "", pico)
+if VARIANT == "picoplus2":
+    comp("M1", f"{LIB}:Pico_Plus_2", "Pimoroni Pico Plus 2",
+         "Module:RaspberryPi_Pico_Common_THT", "", pico)
 
-# D1: MSX +5V -> VSYS (blocks back-feeding the MSX from USB)
-comp("D1", "Device:D_Schottky", "B5819W", "Diode_SMD:D_SOD-123", "B5819W",
-     {"1": "VSYS", "2": "+5V"})
+    # D1: MSX +5V -> VSYS (blocks back-feeding the MSX from USB)
+    comp("D1", "Device:D_Schottky", "B5819W", "Diode_SMD:D_SOD-123", "B5819W",
+         {"1": "VSYS", "2": "+5V"})
 
 # HDMI (DVI) output with 270R series resistors (~500mV TMDS swing into 50R)
 DVI_PAIRS = [("D2", "1", "3"), ("D1", "4", "6"), ("D0", "7", "9"), ("CK", "10", "12")]
@@ -206,4 +284,5 @@ comp("C6", "Device:C", "10u", FP_C, "CL21A106KAYNNNE", {"1": "+5V", "2": "GND"})
 comp("C7", "Device:C", "10u", FP_C, "CL21A106KAYNNNE", {"1": "+3V3", "2": "GND"})
 
 # Nets that need a PWR_FLAG (driven only by passive pins)
-PWR_FLAG_NETS = ["+5V", "GND", "VSYS"]
+PWR_FLAG_NETS = (["+5V", "GND", "VSYS"] if VARIANT == "picoplus2"
+                 else ["+5V", "GND", "VBUS"])

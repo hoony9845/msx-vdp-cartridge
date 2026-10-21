@@ -33,6 +33,8 @@
 /* ---- PSRAM (VRAM) ---- */
 #if defined(PIMORONI_PICO_PLUS2_RP2350)
 #define PIN_PSRAM_CS PIMORONI_PICO_PLUS2_PSRAM_CS_PIN   /* GPIO 47 */
+#elif defined(WAVESHARE_CORE2350B)
+#define PIN_PSRAM_CS WAVESHARE_CORE2350B_PSRAM_CS_PIN   /* GPIO 47 (B1/B2 versions) */
 #elif defined(V9990_PSRAM_CS_PIN)
 #define PIN_PSRAM_CS V9990_PSRAM_CS_PIN                 /* -DV9990_PSRAM_CS_PIN=... */
 #else

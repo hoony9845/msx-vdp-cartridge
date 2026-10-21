@@ -52,6 +52,26 @@ for pad, via in helpers.gnd_fanout_points(board):
     v.SetNet(gnd_net)
     board.Add(v)
 
+# Core2350B: the outer ring of pins cages the middle of the module, so the
+# pour inside only reaches the inner-ring GND pins. Run a 0.3mm track from the
+# inner GND pin P2-8 (pad 24) out between two outer pins to a via.
+m1 = next(f for f in board.GetFootprints() if f.GetReference() == "M1")
+if "Core2350B" in m1.GetFPIDAsString():
+    p = next(q for q in m1.Pads() if q.GetNumber() == "24").GetPosition()
+    cx = sum(q.GetPosition().x for q in m1.Pads()) // len(list(m1.Pads()))
+    out_dir_x = -1 if p.x < cx else 1
+    x0, y0 = pcbnew.ToMM(p.x), pcbnew.ToMM(p.y)
+    mid = (x0, y0 + 1.27)                               # between two rows of pins
+    end = (x0 + out_dir_x * (2.54 + 3.0), y0 + 1.27)    # outside the module
+    helpers.add_track(board, (x0, y0), mid, gnd_net, 0.3)
+    helpers.add_track(board, mid, end, gnd_net, 0.3)
+    v = pcbnew.PCB_VIA(board)
+    v.SetPosition(helpers.V(*end))
+    v.SetWidth(MM(0.6))
+    v.SetDrill(MM(0.3))
+    v.SetNet(gnd_net)
+    board.Add(v)
+
 # drop pours from a previous run
 for z in list(board.Zones()):
     if not z.GetIsRuleArea():

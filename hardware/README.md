@@ -1,6 +1,23 @@
 # MSX V9990 카트리지 PCB (KiCad 8)
 
-Pimoroni Pico Plus 2를 얹는 MSX 카트리지 기판. 회로 설명은 [../docs/hardware.md](../docs/hardware.md) 참고.
+RP2350 모듈을 얹는 MSX 카트리지 기판. 회로 설명은 [../docs/hardware.md](../docs/hardware.md) 참고.
+같은 생성 스크립트로 두 가지 버전을 만든다(외형, 엣지 커넥터, 구멍 H1/H2, 버스 회로는 동일).
+
+| 버전 | 모듈 | KiCad 프로젝트 | 제조 파일 | 빌드 |
+|---|---|---|---|---|
+| Pico Plus 2 | Pimoroni Pico Plus 2 (2×20 핀헤더) | `msx_v9990_cart/` | `fab/` | `./build.sh` |
+| Core2350B | Waveshare Core2350B **B1(2MB) 또는 B2(8MB) PSRAM판** (2×8 핀헤더 4개) | `msx_v9990_cart_core2350b/` | `fab_core2350b/` | `MSX_VARIANT=core2350b ./build.sh` |
+
+### Core2350B 버전 메모
+
+- PSRAM이 모듈 뒷면에 있으므로 **반드시 핀헤더로 띄워서** 장착한다. 모듈 아래에는 배선과 비아가 지나간다.
+- USB, BOOTSEL, RESET은 모듈의 **FFC 커넥터 + Waveshare USB 어댑터**를 쓴다(카트리지에는 없음).
+  FFC 커넥터는 모듈 왼쪽 위 모서리 쪽에 오며, 케이블은 모듈 위로 지나간다.
+- 전원: MSX +5V → D1(쇼트키) → 모듈 VBUS. USB 어댑터 연결 시 USB 전원이 MSX 쪽으로 역류하지 않는다.
+- GPIO 할당과 PSRAM CS(GP47)는 Pico Plus 2판과 같다. 펌웨어는 `cmake -DPICO_BOARD=waveshare_core2350b`로 빌드.
+- 모듈 핀 배치는 Waveshare 회로도(Core2350B.pdf)의 P1–P4 헤더와 제품 사진의 실크 표기를 대조해 정했다.
+  **주문 전에 구멍 확인용 PDF(`fab_core2350b/*_hole_check*.pdf`) 위에 모듈 실물을 올려 확인할 것.**
+- 패드 번호: 1–16 = P1, 17–32 = P2, 33–48 = P3, 49–64 = P4.
 
 - 2층, 1.6mm, 99.8 × 64.0 mm (엣지 탭 65.45 × 11 mm)
 - 외곽선과 엣지 커넥터 치수는 실제 슬롯에 맞는 것으로 검증된 costarc의 MSX-Protoboard 카트리지 외형을 따름

@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.13)
 
 # Defaults for the Pimoroni Pico Plus 2; override on the command line, e.g.
+#   cmake -DPICO_BOARD=waveshare_core2350b ...        (Waveshare Core2350B1/B2)
 #   cmake -DPICO_BOARD=<board> -DV9990_PSRAM_CS_PIN=<gpio> ...
 set(PICO_BOARD pimoroni_pico_plus2_rp2350 CACHE STRING "Board type")
+list(APPEND PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards)
 set(PICO_PLATFORM rp2350-arm-s CACHE STRING "Platform")
 
 include(pico_sdk_import.cmake)

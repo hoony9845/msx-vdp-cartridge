@@ -58,7 +58,10 @@ with open(os.path.join(out_dir, f"{P}_bom_jlcpcb.csv"), "w", newline="") as f:
     for (value, fp, mpn), refs in sorted(groups.items(), key=lambda g: ref_key(sorted(g[1], key=ref_key)[0])):
         refs = sorted(refs, key=ref_key)
         note = ""
-        if refs == ["M1"]:
+        if refs == ["M1"] and design.VARIANT == "core2350b":
+            note = ("Waveshare Core2350B1/B2 (PSRAM version) on 4x 2x8 2.54mm pin headers "
+                    "(PSRAM on its back) - hand-mounted, not assembled by JLCPCB")
+        elif refs == ["M1"]:
             note = "Hand-mounted module on 2x20 pin headers - not assembled by JLCPCB"
         elif refs == ["J2"]:
             note = "Check that the purchased HDMI receptacle matches this footprint"

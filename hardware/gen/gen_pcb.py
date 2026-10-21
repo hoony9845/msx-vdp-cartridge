@@ -56,6 +56,52 @@ HOLES = [(46.74, 62.0, 2.5),     # H2 (cartridge-shell post)
 TONGUE = [(42.48, 72.989), (107.93, 72.989), (107.93, BOARD_BOTTOM), (42.48, BOARD_BOTTOM)]
 
 
+def write_core2350b_footprint():
+    """Waveshare Core2350B: 64 holes on a 10x10 2.54mm grid (outer two rings),
+    four 2x8 headers in a pinwheel. Pads 1-16 = P1 (left), 17-32 = P2 (top),
+    33-48 = P3 (bottom), 49-64 = P4 (right), unrotated, seen from the top."""
+    os.makedirs(lib_dir, exist_ok=True)
+    u = lambda: str(uuid.uuid4())
+    font = "(effects (font (size 1 1) (thickness 0.15)))"
+    lines = [
+        '(footprint "Waveshare_Core2350B" (version 20240108) (generator "pcbnew") (generator_version "8.0") (layer "F.Cu")',
+        '  (descr "Waveshare Core2350B RP2350B core board, 25.4x25.4mm, 64 pins on a 2.54mm grid '
+        '(four 2x8 headers). https://www.waveshare.com/wiki/Core2350B0")',
+        '  (tags "RP2350B Waveshare core board module")',
+        f'  (property "Reference" "M1" (at 0 -14.2 0) (layer "F.SilkS") (uuid "{u()}") {font})',
+        f'  (property "Value" "Waveshare_Core2350B" (at 0 14.2 0) (layer "F.Fab") (uuid "{u()}") {font})',
+        f'  (property "Footprint" "" (at 0 0 0) (layer "F.Fab") (hide yes) (uuid "{u()}") {font})',
+        f'  (property "Datasheet" "" (at 0 0 0) (layer "F.Fab") (hide yes) (uuid "{u()}") {font})',
+        f'  (property "Description" "" (at 0 0 0) (layer "F.Fab") (hide yes) (uuid "{u()}") {font})',
+        '  (attr through_hole)',
+    ]
+    for header in range(4):
+        for i in range(16):
+            n = header * 16 + i + 1
+            k, odd = i // 2, (i % 2 == 0)
+            if header == 0:   # P1 left
+                c, r = (0 if odd else 1), k
+            elif header == 1:  # P2 top
+                c, r = 9 - k, (0 if odd else 1)
+            elif header == 2:  # P3 bottom
+                c, r = k, (9 if odd else 8)
+            else:              # P4 right
+                c, r = (9 if odd else 8), 9 - k
+            x, y = (c - 4.5) * 2.54, (r - 4.5) * 2.54
+            shape = "rect" if i == 0 else "circle"
+            lines.append(f'  (pad "{n}" thru_hole {shape} (at {x:.3f} {y:.3f}) (size 1.7 1.7) (drill 1.0) '
+                         f'(layers "*.Cu" "*.Mask") (remove_unused_layers no) (uuid "{u()}"))')
+    for layer, h, w in (("F.Fab", 12.7, 0.1), ("F.SilkS", 13.0, 0.12), ("F.CrtYd", 13.2, 0.05)):
+        lines.append(f'  (fp_rect (start -{h} -{h}) (end {h} {h}) (stroke (width {w}) (type default)) '
+                     f'(fill none) (layer "{layer}") (uuid "{u()}"))')
+    for txt, x, y in (("P1", -9.5, 0), ("P2", 0, -9.5), ("P3", 0, 9.5), ("P4", 9.5, 0)):
+        lines.append(f'  (fp_text user "{txt}" (at {x} {y} 0) (layer "F.Fab") (uuid "{u()}") {font})')
+    lines.append(f'  (fp_text user "Core2350B" (at 0 0 0) (layer "F.Fab") (uuid "{u()}") {font})')
+    lines.append(")")
+    with open(os.path.join(lib_dir, "Waveshare_Core2350B.kicad_mod"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def write_edge_footprint():
     """MSX edge connector: odd pins on B.Cu, even on F.Cu, pin 1/2 on the right
     when viewed from the front. Pin 44 (SW1) is 1mm shorter at the edge side."""
@@ -115,6 +161,19 @@ PLACE = {
 # DVI series resistors in HDMI pad order (D2+ D2- D1+ D1- D0+ D0- CK+ CK-)
 for i, ref in enumerate(["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"]):
     PLACE[ref] = (73.5 + i * 1.8, 39.0, 90)     # right end stays clear of HDMI pin 18 (+5V)
+if design.VARIANT == "core2350b":
+    # Waveshare Core2350B, rotated so P2 (VBUS/3V3, unused USB/SWD) faces the
+    # left edge, P1 (GP0-11) faces the bus ICs and P3 (DVI, control) faces right,
+    # leaving a channel between the module and the HDMI resistors.
+    PLACE.update({
+        "M1": (50.0, 36.0, 90),          # footprint origin = module centre, bus pins above U1/U2
+        "J2": (80.0, 23.5, 180),
+        "D1": (31.0, 40.0, 0),           # MSX +5V -> module VBUS (left of the module)
+        "C6": (31.0, 36.5, 0),           # +5V bulk
+        "C7": (35.0, 43.62, 180),        # +3V3 bulk, fed by a fixed track from the 3V3 pin
+    })
+    for i, ref in enumerate(["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"]):
+        PLACE[ref] = (69.6 + i * 1.8, 39.0, 90)
 # Decoupling caps: next to each IC's VCC pin
 DECOUPLE = {"C1": "U1", "C2": "U2", "C3": "U3", "C4": "U4", "C5": "U5"}
 
@@ -209,6 +268,8 @@ def add_rule_area(board, pts, layers, no_vias=True, no_tracks=False, no_pour=Tru
 
 def main():
     write_edge_footprint()
+    if design.VARIANT == "core2350b":
+        write_core2350b_footprint()
     comps, nets = load_netlist(netlist_path)
 
     board = pcbnew.NewBoard(pcb_path)
@@ -261,6 +322,10 @@ def main():
         t.SetTextThickness(MM(0.15))
         if ref in ("M1", "J2"):
             fp.Value().SetVisible(False)        # own silkscreen labels are placed instead
+        if ref == "J2":
+            t.SetVisible(False)                 # the "HDMI" label sits there
+        if ref == "D1" and design.VARIANT == "picoplus2":
+            t.SetPosition(V(PLACE["D1"][0] - 3.6, PLACE["D1"][1]))   # keep off the board edge
         if ref in ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"):
             x, y, _ = PLACE[ref]
             t.SetPosition(V(x, y + 2.7))
@@ -323,6 +388,17 @@ def main():
         # narrow where it leaves the 0.5mm-pitch pad row
         pcb_helpers.add_track(board, a, b, p18.GetNet(), 0.25 if i == 0 else 0.4)
 
+    if design.VARIANT == "core2350b":
+        # The module's 3V3 pin is on the inner ring; power-width tracks cannot
+        # pass between the outer-ring pins (0.84mm gap). Leave with 0.3mm
+        # between two rows of pins to C7 just outside the module.
+        p3 = next(p for p in fps["M1"].Pads() if p.GetNetname() == "+3V3")
+        c7 = next(p for p in fps["C7"].Pads() if p.GetNetname() == "+3V3")
+        ax, ay = pcbnew.ToMM(p3.GetPosition().x), pcbnew.ToMM(p3.GetPosition().y)
+        cx, cy = pcbnew.ToMM(c7.GetPosition().x), pcbnew.ToMM(c7.GetPosition().y)
+        pcb_helpers.add_track(board, (ax, ay), (ax, cy), p3.GetNet(), 0.3)
+        pcb_helpers.add_track(board, (ax, cy), (cx, cy), p3.GetNet(), 0.3)
+
     # reserve the GND fan-out stubs/vias (added by finish_pcb.py)
     import pcb_helpers
     for i, (pad, via) in enumerate(pcb_helpers.gnd_fanout_points(board)):
@@ -358,9 +434,13 @@ def main():
     add_text(board, "CARTRIDGE (RP2350)", 106.0, 25.6, 1.0)
     add_text(board, "rev 0.1", 106.0, 27.8, 0.9)
     add_text(board, "hoony9845@gmail.com", 106.0, 29.8, 0.9)
-    add_text(board, "HDMI", 84.0, 31.0, 1.0)
-    add_text(board, "USB", 23.5, 49.0, 0.9)
-    add_text(board, "Pimoroni Pico Plus 2", 46.0, 49.0, 0.9)
+    hx = PLACE["J2"][0]
+    add_text(board, "HDMI", hx, 31.0, 1.0)
+    if design.VARIANT == "picoplus2":
+        add_text(board, "USB", 23.5, 49.0, 0.9)
+        add_text(board, "Pimoroni Pico Plus 2", 46.0, 49.0, 0.9)
+    else:
+        add_text(board, "Waveshare Core2350B (on pin headers)", 50.0, 50.2, 0.9)
     add_text(board, "LABEL SIDE / PINS 2-50", 75.2, 72.0, 0.9)
     add_text(board, "PINS 1-49", 75.2, 72.0, 0.9, layer=pcbnew.B_SilkS)
     add_text(board, "Generated by hardware/gen", 75.0, 40.0, 0.9, layer=pcbnew.B_SilkS)
