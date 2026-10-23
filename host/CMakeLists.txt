@@ -22,3 +22,7 @@ target_link_libraries(render_demo v9990_core)
 
 enable_testing()
 add_test(NAME test_v9990 COMMAND test_v9990)
+
+add_executable(replay replay.c)
+target_link_libraries(replay v9990_core)
+target_compile_options(replay PRIVATE -Wall -Wextra)

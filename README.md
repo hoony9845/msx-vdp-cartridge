@@ -16,7 +16,8 @@ core/        이식 가능한 V9990 코어 (Pico SDK 의존성 없음, PC와 펌
   v9990_cmd.c    커맨드 엔진(블리터)
   v9990_render.c 스캔라인 렌더러 → RGB565
   v9990_vram.h   VRAM 물리 배치 (P1/P2/Bx 뱅크 인터리브)
-host/        PC용 테스트와 렌더 데모 (gcc)
+host/        PC용 테스트, 렌더 데모, 트레이스 재생기 (gcc)
+tools/compare/  openMSX(GFX9000)와 도트 단위 비교 환경, 게임 기록 도구
 firmware/    RP2350 펌웨어 (pico-sdk)
   src/bus.pio    버스 모니터 + 읽기 응답 PIO 프로그램
   src/bus.c      core1: 버스 이벤트 처리, 커맨드 엔진 실행, /INT
@@ -88,6 +89,7 @@ cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
 | 15kHz RGB 출력 (PIO + 저항 DAC) | ⬜ 선택 사항 |
 
 기준 자료: Yamaha V9990 Application Manual(1992), 매뉴얼에 없는 동작은 openMSX의 구현을 참고했다.
+`tools/compare/`로 openMSX 16.0과 비교한 결과, 테스트 장면 전부가 도트 단위로 일치한다.
 펌웨어의 렌더러는 스캔보다 2–3줄 앞서 그리므로, 화면 중간의 레지스터 변경은 몇 줄 일찍 적용된다(TODO).
 
 코드의 `VERIFY` 주석은 V9990 Application Manual이나 openMSX와 아직 대조하지 않은 부분이다
