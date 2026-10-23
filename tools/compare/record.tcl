@@ -20,11 +20,12 @@ set ::rec_fd [open [file join $::rec_dir trace.txt] w]
 fconfigure $::rec_fd -buffering full
 
 proc rec_write {} {
-    puts $::rec_fd [format "w 0x%02X 0x%02X" $::wp_last_address $::wp_last_value]
+    # OUT (C),A puts B on A15-A8: keep the low byte only
+    puts $::rec_fd [format "w 0x%02X 0x%02X" [expr {$::wp_last_address & 0xFF}] $::wp_last_value]
 }
 
 proc rec_read {} {
-    puts $::rec_fd [format "r 0x%02X" $::wp_last_address]
+    puts $::rec_fd [format "r 0x%02X" [expr {$::wp_last_address & 0xFF}]]
 }
 
 proc rec_next_frame {} {

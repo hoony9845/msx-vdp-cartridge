@@ -58,6 +58,9 @@ typedef struct {
     uint16_t remaining_x, remaining_y;
     uint16_t data_word;     /* LMMC/LMCM 16bpp byte assembly */
     uint8_t  data_phase;
+    uint32_t src_addr;      /* CMMM: linear source byte address */
+    uint8_t  bits;          /* CMMM: current character byte */
+    uint8_t  bits_left;     /* CMMM: bits left in `bits` */
 } v9990_cmd_state_t;
 
 typedef struct v9990 {

@@ -39,9 +39,9 @@ static inline void set_palette(v9990_t *v, uint8_t index,
     out(v, 0x61, b);
 }
 
-/* Run the command engine to completion (as if time passed). */
+/* Run the command engine until it is done or waits for CPU data. */
 static inline void run_cmd(v9990_t *v) {
-    while (v9990_cmd_step(v, 4096)) {}
+    while (v9990_cmd_step(v, 4096) && !(v->status & V9990_ST_TR)) {}
 }
 
 #endif

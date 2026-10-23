@@ -2,7 +2,7 @@
  * V9990 I/O port, register and bit definitions.
  *
  * Source: Yamaha V9990 E-VDP-III Application Manual + openMSX (V9990.cc).
- * Items marked VERIFY have not yet been checked against the manual.
+ * Checked against the manual; behaviour the manual leaves open follows openMSX.
  */
 #ifndef V9990_REGS_H
 #define V9990_REGS_H

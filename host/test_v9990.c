@@ -321,6 +321,37 @@ static void test_lmmm(void) {
     CHECK_EQ(v9990_vram_read_bx(&vdp, (20 * 256 + 41) * 2), 0xAA);   /* TP kept it */
 }
 
+static void test_cmmc_cmmm(void) {
+    setup();
+    set_reg(&vdp, 6, 0x80 | (0 << 2) | 2);         /* 256 wide, 8bpp */
+    out(&vdp, 0x64, 36);
+    unsigned p[] = { 10, 0, 5, 0, 4, 0, 2, 0, 0, 0x0C, 0xFF, 0xFF, 0x11, 0x22, 0x33, 0x44 };
+    for (unsigned i = 0; i < 16; i++) out(&vdp, 0x63, (uint8_t)p[i]);  /* R#36-R#51 */
+    set_reg(&vdp, 52, V9990_CMD_CMMC << 4);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_TR, V9990_ST_TR);
+    out(&vdp, 0x62, 0xA5);                         /* 1010 / 0101: one byte, two rows */
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, 0);
+    /* x=10 even byte -> FC low (0x11) / BC low (0x33); x=11 odd -> 0x22 / 0x44 */
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 5 * 256 + 10), 0x11);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 5 * 256 + 11), 0x44);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 5 * 256 + 12), 0x11);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 5 * 256 + 13), 0x44);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 6 * 256 + 10), 0x33);   /* second row: 0101 */
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 6 * 256 + 11), 0x22);
+
+    /* CMMM: same character from VRAM at linear address 0x30000 */
+    set_vram_write_addr(&vdp, 0x30000);
+    out(&vdp, 0x60, 0xA5);
+    out(&vdp, 0x64, 32);
+    unsigned q[] = { 0x00, 0, 0x00, 0x03, 100, 0, 50, 0, 4, 0, 2, 0, 0, 0x0C };
+    for (unsigned i = 0; i < 14; i++) out(&vdp, 0x63, (uint8_t)q[i]);  /* R#32-R#45 */
+    set_reg(&vdp, 52, V9990_CMD_CMMM << 4);
+    run_cmd(&vdp);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 50 * 256 + 100), 0x11);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 50 * 256 + 101), 0x44);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 51 * 256 + 101), 0x22);
+}
+
 int main(void) {
     struct { const char *name; void (*fn)(void); } tests[] = {
         { "register_auto_increment", test_register_auto_increment },
@@ -337,6 +368,7 @@ int main(void) {
         { "render_p2",               test_render_p2 },
         { "scroll_split",            test_scroll_split },
         { "lmmm",                    test_lmmm },
+        { "cmmc_cmmm",               test_cmmc_cmmm },
     };
     for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {
         int before = failures;

@@ -81,15 +81,17 @@ cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
 | P1/P2 스프라이트: 125개, 줄당 16개, 앞/뒤 우선순위, 팔레트 | ✅ (PC 테스트) |
 | 세로 스크롤 분할(라인 중간 SCAY 쓰기), R512/R256 롤 | ✅ (PC 테스트) |
 | 비트맵 렌더링 BP2/BP4/BP6/BD8/BD16 | ✅ (PC 테스트) |
-| 커맨드: STOP, LMMC, LMMV, LMMM, PSET (비트맵 좌표계) | ✅ 기본 |
+| 커맨드: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, PSET (비트맵 좌표계, FC/BC/WM 비트 위치 대응) | ✅ (PC 테스트) |
 | 펌웨어: PIO 버스, DVI 출력, PSRAM, 듀얼 코어 | ✅ 빌드됨, **실기 미검증** |
 | 비트맵 커서, YJK/YUV, R#16 화면 위치 조정 | ⬜ TODO |
-| 커맨드: LMCM, CMMx, BMxx, LINE, SRCH, POINT, ADVN, P1/P2 좌표계 | ⬜ TODO |
+| 커맨드: LMCM, CMMK, BMxx, LINE, SRCH, POINT, ADVN, P1/P2 좌표계 | ⬜ TODO |
 | 커맨드 실행 시간, HR 비트, 라인 타이밍 정밀도 | ⬜ TODO |
 | 15kHz RGB 출력 (PIO + 저항 DAC) | ⬜ 선택 사항 |
 
 기준 자료: Yamaha V9990 Application Manual(1992), 매뉴얼에 없는 동작은 openMSX의 구현을 참고했다.
 `tools/compare/`로 openMSX 16.0과 비교한 결과, 테스트 장면 전부가 도트 단위로 일치한다.
+실제 게임 **Chase H.Q. V9990**(DiHalt Studio)의 90초 플레이 기록에서는 캡처 78장 중 76장이 일치한다
+(나머지 2장은 커맨드 실행 도중의 화면으로 추정, 커맨드 실행 시간 구현 후 재확인 필요).
 펌웨어의 렌더러는 스캔보다 2–3줄 앞서 그리므로, 화면 중간의 레지스터 변경은 몇 줄 일찍 적용된다(TODO).
 
 코드의 `VERIFY` 주석은 V9990 Application Manual이나 openMSX와 아직 대조하지 않은 부분이다

@@ -1,13 +1,19 @@
 /*
  * Command engine (blitter).
  *
- * Implemented: STOP, LMMC, LMMV, LMMM, PSET (bitmap coordinate system).
- * TODO: LMCM, CMMC, CMMK, CMMM, BMXL, BMLX, BMLL, LINE, SRCH, POINT, ADVN,
+ * Implemented: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, PSET (bitmap coordinates).
+ * TODO: LMCM, CMMK, BMXL, BMLX, BMLL, LINE, SRCH, POINT, ADVN,
  *       P1/P2 coordinate systems (not fully known, see openMSX), realistic
  *       execution timing.
  *
  * Commands run incrementally via v9990_cmd_step() so the bus loop on core1
  * stays responsive; there is no attempt at cycle-accurate speed yet.
+ *
+ * Manual 11.2: FC, BC and WM map onto VRAM bit positions - bits 0-7 to the
+ * VRAM0 byte (even CPU address in bitmap modes), bits 8-15 to VRAM1 (odd);
+ * with 2/4bpp the dot's bits within that byte are used. NX = 0 means 2048,
+ * NY = 0 means 4096. Character commands (CMMC/CMMM) take one bit per dot,
+ * MSB first, as a continuous stream across rows: 1 = FC, 0 = BC.
  */
 #include "v9990.h"
 #include "v9990_vram.h"
@@ -49,13 +55,22 @@ static void write_pixel(v9990_t *v, unsigned x, unsigned y, unsigned color) {
         return;
     }
 
-    /* VERIFY: which WM byte applies to even/odd addresses */
-    uint8_t wm = v->regs[V9990_R_CMD_WM0 + (addr & 1)];
+    uint8_t wm = v->regs[V9990_R_CMD_WM0 + (addr & 1)];   /* VRAM0 / VRAM1 */
     unsigned shift = 8u - bpp - (bit & 7u);
     uint8_t mask = (uint8_t)((((1u << bpp) - 1u) << shift) & wm);
     uint8_t d = v9990_vram_read_bx(v, addr);
     uint8_t r = (uint8_t)(logop(lop, color << shift, d));
     v9990_vram_write_bx(v, addr, (uint8_t)((d & ~mask) | (r & mask)));
+}
+
+/* Colour of dot (x, y) taken from a 16-bit FC/BC style register pair. */
+static unsigned color_at(const v9990_t *v, unsigned x, unsigned y, uint16_t reg) {
+    const unsigned bpp = v9990_bpp(v);
+    if (bpp == 16) return reg;
+    const unsigned iw = v9990_image_width(v);
+    uint32_t bit = ((uint32_t)y * iw + (x & (iw - 1u))) * bpp;
+    uint8_t byte = (uint8_t)(((bit >> 3) & 1) ? (reg >> 8) : reg);
+    return (byte >> (8u - bpp - (bit & 7u))) & ((1u << bpp) - 1u);
 }
 
 static unsigned read_pixel(const v9990_t *v, unsigned x, unsigned y) {
@@ -94,12 +109,20 @@ static bool advance_rect(v9990_t *v) {
     return true;
 }
 
-static unsigned fore_color(const v9990_t *v) {
-    /* For 2/4/8bpp software replicates the color across FC; the low bits
-     * are sufficient here. */
-    unsigned bpp = v9990_bpp(v);
-    unsigned fc = reg16(v, V9990_R_CMD_FC0);
-    return bpp == 16 ? fc : (fc & ((1u << bpp) - 1u));
+/* Write dot (x, y) with the colour from FC (bit = 1) or BC (bit = 0). */
+static void write_fc_bc(v9990_t *v, unsigned x, unsigned y, bool fc) {
+    uint16_t reg = reg16(v, fc ? V9990_R_CMD_FC0 : V9990_R_CMD_BC0);
+    write_pixel(v, x, y, color_at(v, x, y, reg));
+}
+
+/* One character bit (CMMC/CMMM); returns false when the rectangle is done. */
+static bool character_bit(v9990_t *v, bool bit) {
+    write_fc_bc(v, v->cmd.x, v->cmd.y, bit);
+    if (!advance_rect(v)) {
+        finish(v);
+        return false;
+    }
+    return true;
 }
 
 void v9990_cmd_start(v9990_t *v) {
@@ -111,8 +134,8 @@ void v9990_cmd_start(v9990_t *v) {
     c->dy = reg16(v, V9990_R_CMD_DY0) & 0x0FFF;
     c->nx = reg16(v, V9990_R_CMD_NX0) & 0x07FF;
     c->ny = reg16(v, V9990_R_CMD_NY0) & 0x0FFF;
-    if (c->nx == 0) c->nx = 2048;   /* VERIFY */
-    if (c->ny == 0) c->ny = 4096;   /* VERIFY */
+    if (c->nx == 0) c->nx = 2048;
+    if (c->ny == 0) c->ny = 4096;
     c->x = c->dx;
     c->y = c->dy;
     c->src_x = c->sx;
@@ -136,8 +159,17 @@ void v9990_cmd_start(v9990_t *v) {
     case V9990_CMD_LMMV:
     case V9990_CMD_LMMM:
         break;
+    case V9990_CMD_CMMC:
+        V9990_SET_BITS(v->status, V9990_ST_TR);
+        break;
+    case V9990_CMD_CMMM:
+        /* SA: linear byte address in R#32, R#34, R#35 */
+        c->src_addr = (v->regs[V9990_R_CMD_SX0] | (v->regs[V9990_R_CMD_SY0] << 8) |
+                       ((v->regs[V9990_R_CMD_SY1] & 0x07u) << 16)) & V9990_VRAM_MASK;
+        c->bits_left = 0;
+        break;
     case V9990_CMD_PSET:
-        write_pixel(v, c->dx, c->dy, fore_color(v));
+        write_fc_bc(v, c->dx, c->dy, true);
         finish(v);
         break;
     default:
@@ -159,24 +191,41 @@ V9990_HOT bool v9990_cmd_step(v9990_t *v, unsigned budget) {
         }
     }
     if (v->cmd.op == V9990_CMD_LMMV) {
-        unsigned color = fore_color(v);
         while (budget--) {
-            write_pixel(v, v->cmd.x, v->cmd.y, color);
+            write_fc_bc(v, v->cmd.x, v->cmd.y, true);
             if (!advance_rect(v)) {
                 finish(v);
                 return false;
             }
         }
     }
+    if (v->cmd.op == V9990_CMD_CMMM) {
+        while (budget--) {
+            if (!v->cmd.bits_left) {
+                v->cmd.bits = v9990_vram_read_bx(v, v->cmd.src_addr);
+                v->cmd.src_addr = (v->cmd.src_addr + 1) & V9990_VRAM_MASK;
+                v->cmd.bits_left = 8;
+            }
+            v->cmd.bits_left--;
+            bool bit = (v->cmd.bits & 0x80) != 0;
+            v->cmd.bits = (uint8_t)(v->cmd.bits << 1);
+            if (!character_bit(v, bit)) return false;
+        }
+    }
     return v->cmd.op != 0;
 }
 
 void v9990_cmd_write_data(v9990_t *v, uint8_t data) {
+    if (v->cmd.op == V9990_CMD_CMMC) {
+        for (unsigned i = 0; i < 8; i++, data = (uint8_t)(data << 1))
+            if (!character_bit(v, (data & 0x80) != 0)) return;
+        return;
+    }
     if (v->cmd.op != V9990_CMD_LMMC) return;
     unsigned bpp = v9990_bpp(v);
 
     if (bpp == 16) {
-        /* VERIFY: low byte first */
+        /* low byte first (manual 11.4) */
         if (v->cmd.data_phase == 0) {
             v->cmd.data_word = data;
             v->cmd.data_phase = 1;
@@ -188,7 +237,7 @@ void v9990_cmd_write_data(v9990_t *v, uint8_t data) {
         return;
     }
 
-    /* VERIFY: pixels per byte, leftmost pixel in the MSBs */
+    /* 8/bpp dots per byte, leftmost dot in the MSBs (manual 11.4) */
     for (unsigned shift = 8; shift >= bpp; shift -= bpp) {
         write_pixel(v, v->cmd.x, v->cmd.y,
                     (data >> (shift - bpp)) & ((1u << bpp) - 1u));

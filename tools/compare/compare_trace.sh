@@ -23,6 +23,16 @@ for c in calibration calib_dots_256 calib_dots_512; do
     "$HERE/run_openmsx.sh" "$WORK/traces/$c.txt" "$WORK/openmsx" >/dev/null
 done
 
-"$ROOT/build-host/replay" "$REC/trace.txt" "$WORK/ours"
+python3 "$HERE/shot_window.py" "$REC/trace.txt" "$WORK/trace_window.txt"
+"$ROOT/build-host/replay" "$WORK/trace_window.txt" "$WORK/ours" | tail -1
 cp "$REC"/f*.png "$WORK/openmsx/"
-python3 "$HERE/compare.py" "$WORK/ours" "$WORK/openmsx" "$REC/report"
+# Shots before the software has programmed the V9990 show its power-on state,
+# which is undefined on real hardware (openMSX: white, our core: black).
+# Skip them with V9990_SKIP_BEFORE=<frame>.
+if [ -n "$V9990_SKIP_BEFORE" ]; then
+    for f in "$WORK"/openmsx/f*.png; do
+        n=$(basename "$f" .png | sed 's/^f0*//')
+        [ "${n:-0}" -lt "$V9990_SKIP_BEFORE" ] && rm -f "$f"
+    done
+fi
+python3 "$HERE/compare.py" "$WORK/ours" "$WORK/openmsx" "$REC/report" --window

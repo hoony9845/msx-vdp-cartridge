@@ -6,7 +6,8 @@
  * same data the real chip would:
  *   - P1 : CPU address == physical address
  *   - Bx : even bytes in bank 0, odd bytes in bank 1 (interleaved)
- *   - P2 : interleaved below 0x78000, special areas above -- VERIFY
+ *   - P2 : PGT interleaved (lowest bit selects the bank), SPAT 0x7BE00 in
+ *          VRAM0, PNT 0x7C000 in VRAM1 (manual 10.2.14)
  */
 #ifndef V9990_VRAM_H
 #define V9990_VRAM_H

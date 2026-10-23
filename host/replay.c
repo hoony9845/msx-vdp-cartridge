@@ -26,7 +26,7 @@ static v9990_t vdp;
 
 static void run_cmd(void) {
     while (v9990_cmd_step(&vdp, 1u << 20)) {
-        if (vdp.cmd.op == V9990_CMD_LMMC) break;   /* waits for CPU data */
+        if (vdp.status & V9990_ST_TR) break;   /* LMMC/CMMC wait for CPU data */
     }
 }
 

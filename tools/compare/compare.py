@@ -6,8 +6,14 @@ shot (a full-screen single-colour P1 picture). Every shot is then sampled
 at the centre of each V9990 dot (resolution from the <shot>.size file
 written by host/replay) and compared dot by dot.
 
-    python3 compare.py <ours_dir> <openmsx_dir> <report_dir>
+    python3 compare.py <ours_dir> <openmsx_dir> <report_dir> [--window]
+
+--window: recorded traces only - accept the best of the shots rendered a few
+frames around the recorded position (see shot_window.py), and report a
+picture whose every line matches one of them as tearing (the game redrew
+the screen while it was being scanned out).
 """
+import glob
 import os
 import sys
 
@@ -72,7 +78,9 @@ def compare(a, b):
 
 
 def main():
-    ours_dir, omsx_dir, report_dir = sys.argv[1:4]
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    window = "--window" in sys.argv
+    ours_dir, omsx_dir, report_dir = args[:3]
     os.makedirs(report_dir, exist_ok=True)
 
     rect_ours = display_rect(load(os.path.join(ours_dir, "calibration.ppm")))
@@ -92,21 +100,40 @@ def main():
     lines += ["| shot | V9990 dots | differing dots | result |", "|---|---|---|---|"]
     worst = 0.0
     for name in sorted(os.listdir(omsx_dir)):
-        if not name.endswith(".png"):
+        if not name.endswith(".png") or "__" in name:
             continue
         shot = name[:-4]
         ours_path = os.path.join(ours_dir, shot + ".ppm")
-        if not os.path.exists(ours_path):
+        if not os.path.exists(ours_path) and not (window and glob.glob(
+                os.path.join(ours_dir, shot + "__o*.ppm"))):
             lines.append(f"| {shot} | – | – | missing in ours |")
             continue
-        with open(os.path.join(ours_dir, shot + ".size")) as f:
+        variants = sorted(glob.glob(os.path.join(ours_dir, shot + "__o*.ppm"))) if window else []
+        size_path = os.path.join(ours_dir, shot + ".size")
+        if not os.path.exists(size_path) and variants:
+            size_path = variants[0][:-4] + ".size"
+        with open(size_path) as f:
             src_w, src_h = (int(v) for v in f.read().split())
         if ("ours", src_w) not in columns:
             lines.append(f"| {shot} | {src_w}x{src_h} | – | no dot calibration for this width |")
             continue
-        a = sample(load(ours_path), rect_ours, src_w, src_h, columns[("ours", src_w)])
         b = sample(load(os.path.join(omsx_dir, name)), rect_omsx, src_w, src_h, columns[("omsx", src_w)])
-        frac, bad = compare(a, b)
+        # --window: try the neighbouring frames rendered by shot_window.py
+        cands = [("0", ours_path)]
+        if variants:
+            cands = sorted(((p.rsplit("__o", 1)[1][:-4], p) for p in variants),
+                           key=lambda c: abs(int(c[0])))
+        best, row_ok = None, [False] * src_h
+        for label, path in cands:
+            cand = sample(load(path), rect_ours, src_w, src_h, columns[("ours", src_w)])
+            f, m = compare(cand, b)
+            for y in range(src_h):                 # rows matched by this candidate
+                if not row_ok[y] and not any(m.crop((0, y, src_w, y + 1)).getdata()):
+                    row_ok[y] = True
+            if best is None or f < best[0]:
+                best = (f, m, cand, label)
+        frac, bad, a, offset = best
+        tearing = window and frac > 0 and all(row_ok)
         worst = max(worst, frac)
         vis = Image.blend(a.convert("L").convert("RGB"), Image.new("RGB", a.size), 0.6)
         vis.paste((255, 0, 0), mask=bad)
@@ -116,7 +143,10 @@ def main():
         side = side.resize((side.size[0] * 2, side.size[1] * 2), Image.NEAREST)
         side.save(os.path.join(report_dir, shot + "_ours_openmsx_diff.png"))
         verdict = "OK" if frac == 0 else ("close" if frac < 0.001 else "DIFFERENT")
-        lines.append(f"| {shot} | {src_w}x{src_h} | {frac * 100:.3f}% | {verdict} |")
+        if tearing:
+            verdict = "OK (tearing: every line matches some frame)"
+        lines.append(f"| {shot} | {src_w}x{src_h} | {frac * 100:.3f}% | {verdict}"
+                     + (f" (frame {offset})" if window else "") + " |")
 
     with open(os.path.join(report_dir, "report.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
