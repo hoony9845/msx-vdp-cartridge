@@ -53,23 +53,71 @@ def dot_columns(img, rect, src_w):
     return runs
 
 
-def sample(img, rect, src_w, src_h, columns):
+ROW_COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+
+
+def line_rows(img, rect, src_h):
+    """Pixel row of the centre of every display line, measured on a
+    calib_rows shot (VRAM rows 0-6 and 200-206 coloured). Lines outside the
+    picture (openMSX hides the first line of the 240-line modes) are None."""
+    px = img.load()
+    x = (rect[0] + rect[2]) // 2
+    H = img.size[1]
+
+    def colour(y):
+        for i, c in enumerate(ROW_COLORS):
+            if all(abs(a - b) < 40 for a, b in zip(px[x, y], c)):
+                return i
+        return None
+    # centre pixel row of every visible marker run: (line, y)
+    marks, y = [], 0
+    while y < H:
+        c = colour(y)
+        if c is None:
+            y += 1
+            continue
+        y0 = y
+        while y < H and colour(y) == c:
+            y += 1
+        marks.append((c, (y0 + y - 1) / 2))
+    top = [m for m in marks if m[1] < H / 2]
+    bottom = [m for m in marks if m[1] >= H / 2]
+    (l0, y0), (l1, y1) = top[-1], bottom[-1]
+    l1 += 200
+    pitch = (y1 - y0) / (l1 - l0)
+    rows = []
+    for line in range(src_h):
+        yy = y0 + (line - l0) * pitch
+        rows.append(int(round(yy)) if 0 <= yy < H else None)
+    return rows
+
+
+def sample(img, rect, src_w, src_h, columns, rows=None):
     """Take the centre of every V9990 dot inside the display rectangle,
     giving a src_w x src_h image independent of how it was scaled."""
     left, top, right, bottom = rect
     ch = (bottom - top) / src_h
-    out = Image.new("RGB", (src_w, src_h))
+    out = Image.new("RGB", (src_w, src_h), (255, 0, 255))
     px = img.load()
     po = out.load()
     for y in range(src_h):
-        sy = int(top + (y + 0.5) * ch)
+        sy = rows[y] if rows else int(top + (y + 0.5) * ch)
+        if sy is None:
+            continue                       # line not visible: magenta marker
         for x in range(src_w):
             po[x, y] = px[columns[x], sy]
     return out
 
 
 def compare(a, b):
-    """Return (fraction of differing dots, mask of differing dots)."""
+    """Return (fraction of differing dots, mask of differing dots).
+    Lines that one side cannot show (all magenta) are not compared."""
+    a, b = a.copy(), b.copy()
+    pa, pb = a.load(), b.load()
+    for y in range(a.size[1]):
+        if pa[0, y] == (255, 0, 255) or pb[0, y] == (255, 0, 255):
+            for x in range(a.size[0]):
+                pa[x, y] = pb[x, y] = (0, 0, 0)
     diff = ImageChops.difference(a, b)
     r, g, bl = Image.eval(diff, lambda v: 255 if v > TOLERANCE else 0).split()
     bad = ImageChops.lighter(ImageChops.lighter(r, g), bl)
@@ -83,19 +131,43 @@ def main():
     ours_dir, omsx_dir, report_dir = args[:3]
     os.makedirs(report_dir, exist_ok=True)
 
-    rect_ours = display_rect(load(os.path.join(ours_dir, "calibration.ppm")))
-    rect_omsx = display_rect(load(os.path.join(omsx_dir, "calibration.png")))
+    # display area per V9990 resolution: "calibration" covers the 212-line
+    # 256/512 dot modes, calibration_<w>x<h> other modes (e.g. B2 384x240)
+    rects = {}
+    for name in os.listdir(ours_dir):
+        if name.startswith("calibration") and name.endswith(".ppm"):
+            stem = name[:-4]
+            omsx = os.path.join(omsx_dir, stem + ".png")
+            if not os.path.exists(omsx):
+                continue
+            key = "default" if stem == "calibration" else stem.split("_", 1)[1]
+            rects[key] = (display_rect(load(os.path.join(ours_dir, name))), display_rect(load(omsx)))
+    rect_ours, rect_omsx = rects["default"]
     lines = ["# V9990 core vs openMSX", "",
-             f"display area: ours {rect_ours}, openMSX {rect_omsx}", ""]
+             "display areas (ours, openMSX): " +
+             ", ".join(f"{k}: {v[0]} / {v[1]}" for k, v in sorted(rects.items())), ""]
     lines.append("Both shots are sampled at the centre of every V9990 dot, located with "
                  "the calib_dots shots (openMSX stretches the picture horizontally).")
     lines.append("")
 
     columns = {}
-    for w in (256, 512):
+    for w in (256, 384, 512):
+        if not os.path.exists(os.path.join(ours_dir, f"calib_dots_{w}.ppm")):
+            continue
         name = f"calib_dots_{w}"
-        columns[("ours", w)] = dot_columns(load(os.path.join(ours_dir, name + ".ppm")), rect_ours, w)
-        columns[("omsx", w)] = dot_columns(load(os.path.join(omsx_dir, name + ".png")), rect_omsx, w)
+        ro, rm = rects.get(f"{w}x240", rects["default"]) if w == 384 else rects["default"]
+        columns[("ours", w)] = dot_columns(load(os.path.join(ours_dir, name + ".ppm")), ro, w)
+        columns[("omsx", w)] = dot_columns(load(os.path.join(omsx_dir, name + ".png")), rm, w)
+
+    rowmaps = {}
+    for key in ("256x212", "384x240"):
+        name = f"calib_rows_{key}"
+        if not os.path.exists(os.path.join(ours_dir, name + ".ppm")):
+            continue
+        h = int(key.split("x")[1])
+        ro, rm = rects.get(key, rects["default"])
+        rowmaps[("ours", h)] = line_rows(load(os.path.join(ours_dir, name + ".ppm")), ro, h)
+        rowmaps[("omsx", h)] = line_rows(load(os.path.join(omsx_dir, name + ".png")), rm, h)
 
     lines += ["| shot | V9990 dots | differing dots | result |", "|---|---|---|---|"]
     worst = 0.0
@@ -117,7 +189,9 @@ def main():
         if ("ours", src_w) not in columns:
             lines.append(f"| {shot} | {src_w}x{src_h} | – | no dot calibration for this width |")
             continue
-        b = sample(load(os.path.join(omsx_dir, name)), rect_omsx, src_w, src_h, columns[("omsx", src_w)])
+        rect_ours, rect_omsx = rects.get(f"{src_w}x{src_h}", rects["default"])
+        b = sample(load(os.path.join(omsx_dir, name)), rect_omsx, src_w, src_h,
+                   columns[("omsx", src_w)], rowmaps.get(("omsx", src_h)))
         # --window: try the neighbouring frames rendered by shot_window.py
         cands = [("0", ours_path)]
         if variants:
@@ -125,7 +199,8 @@ def main():
                            key=lambda c: abs(int(c[0])))
         best, row_ok = None, [False] * src_h
         for label, path in cands:
-            cand = sample(load(path), rect_ours, src_w, src_h, columns[("ours", src_w)])
+            cand = sample(load(path), rect_ours, src_w, src_h, columns[("ours", src_w)],
+                          rowmaps.get(("ours", src_h)))
             f, m = compare(cand, b)
             for y in range(src_h):                 # rows matched by this candidate
                 if not row_ok[y] and not any(m.crop((0, y, src_w, y + 1)).getdata()):

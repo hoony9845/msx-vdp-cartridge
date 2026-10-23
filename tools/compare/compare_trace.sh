@@ -18,7 +18,8 @@ ninja -C "$ROOT/build-host" replay >/dev/null
 
 # geometry calibration shots (same openMSX settings as the recording)
 python3 "$HERE/scenarios.py" "$WORK/traces" >/dev/null
-for c in calibration calib_dots_256 calib_dots_512; do
+for c in calibration calib_dots_256 calib_dots_512 calibration_384x240 calib_dots_384 \
+         calib_rows_256x212 calib_rows_384x240; do
     "$ROOT/build-host/replay" "$WORK/traces/$c.txt" "$WORK/ours" >/dev/null
     "$HERE/run_openmsx.sh" "$WORK/traces/$c.txt" "$WORK/openmsx" >/dev/null
 done

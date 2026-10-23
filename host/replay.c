@@ -72,6 +72,14 @@ static int write_shot(const char *dir, const char *name) {
         fprintf(f, "%u %u\n", v9990_display_width(&vdp), h);
         fclose(f);
     }
+    if (getenv("REPLAY_DUMP_VRAM")) {
+        snprintf(path, sizeof(path), "%s/%s.vram", dir, name);
+        f = fopen(path, "wb");
+        if (f) {
+            fwrite(vram, 1, V9990_VRAM_SIZE, f);
+            fclose(f);
+        }
+    }
     printf("shot %s/%s.ppm\n", dir, name);
     return 0;
 }

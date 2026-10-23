@@ -6,6 +6,7 @@
 #   V9990_RECORD        output directory (trace.txt + f<frame>.png)
 #   V9990_SHOT_EVERY    screenshot interval in frames (default 60)
 #   V9990_FRAMES        stop after this many frames (default: until quit)
+#   V9990_DUMP_VRAM     if set, also save the 512KB VRAM at every shot (<shot>.vram)
 #
 # Screenshots are taken at frame boundaries; the replay renders the state at
 # the same point, so pictures that change registers mid-frame (raster
@@ -35,6 +36,12 @@ proc rec_next_frame {} {
         set name [format "f%06d" $::rec_frame]
         puts $::rec_fd "shot $name"
         screenshot [file join $::rec_dir "$name.png"]
+        if {[info exists ::env(V9990_DUMP_VRAM)]} {
+            # physical VRAM (openMSX layout = ours), for compare_vram.py
+            set fd [open [file join $::rec_dir "$name.vram"] wb]
+            puts -nonewline $fd [debug read_block "Sunrise GFX9000 VRAM" 0 0x80000]
+            close $fd
+        }
     }
     flush $::rec_fd
     if {$::rec_limit > 0 && $::rec_frame >= $::rec_limit} {

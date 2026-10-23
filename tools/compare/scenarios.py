@@ -130,6 +130,46 @@ def calib_dots(p2):
     return t
 
 
+def calib_b2(dots):
+    """B2 (384x240, MCS=1): full white, or alternating white/black dots."""
+    t = Trace()
+    reset(t)
+    t.out(7, 0x01)                       # MCS: 14.3MHz master clock (B2/B4)
+    t.mode(0x80 | 0x10 | (1 << 2) | 1)   # bitmap, DCKM=1, 512 wide image, 4bpp
+    t.reg(8, 0x80 | 0x40)
+    t.reg(13, 0)
+    t.palette(1, 31, 31, 31)
+    t.lmmv(0, 0, 512, 256, 0x1010 if dots else 0x1111)
+    t.frame(2)
+    t.shot("calib_dots_384" if dots else "calibration_384x240")
+    return t
+
+
+ROW_COLORS = [(31, 0, 0), (0, 31, 0), (0, 0, 31), (31, 31, 0), (0, 31, 31), (31, 0, 31), (31, 31, 31)]
+
+
+def calib_rows(b2):
+    """VRAM rows 0-6 and 200-206 in distinct colours: locates every display
+    line vertically (openMSX may hide the first line of the 240-line modes)."""
+    t = Trace()
+    reset(t)
+    if b2:
+        t.out(7, 0x01)
+        t.mode(0x80 | 0x10 | (1 << 2) | 1)      # B2 384x240
+    else:
+        t.mode(0x80 | (1 << 2) | 1)             # B1 256x212
+    t.reg(8, 0x80 | 0x40)
+    t.reg(13, 0)
+    for i, c in enumerate(ROW_COLORS):
+        t.palette(i + 1, *c)
+    for base in (0, 200):
+        for y in range(len(ROW_COLORS)):
+            t.lmmv(0, base + y, 512, 1, (y + 1) * 0x1111)
+    t.frame(2)
+    t.shot("calib_rows_384x240" if b2 else "calib_rows_256x212")
+    return t
+
+
 def p1_scene():
     t = Trace()
     reset(t)
@@ -250,6 +290,10 @@ SCENARIOS = {
     "calibration": calibration,
     "calib_dots_256": lambda: calib_dots(False),
     "calib_dots_512": lambda: calib_dots(True),
+    "calibration_384x240": lambda: calib_b2(False),
+    "calib_dots_384": lambda: calib_b2(True),
+    "calib_rows_256x212": lambda: calib_rows(False),
+    "calib_rows_384x240": lambda: calib_rows(True),
     "p1_scene": p1_scene,
     "p2_scene": p2_scene,
     "bitmap_bd16": bitmap_bd16,

@@ -90,8 +90,9 @@ cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
 
 기준 자료: Yamaha V9990 Application Manual(1992), 매뉴얼에 없는 동작은 openMSX의 구현을 참고했다.
 `tools/compare/`로 openMSX 16.0과 비교한 결과, 테스트 장면 전부가 도트 단위로 일치한다.
-실제 게임 **Chase H.Q. V9990**(DiHalt Studio)의 90초 플레이 기록에서는 캡처 78장 중 76장이 일치한다
-(나머지 2장은 커맨드 실행 도중의 화면으로 추정, 커맨드 실행 시간 구현 후 재확인 필요).
+실제 게임에서는 다음과 같다.
+- **Chase H.Q. V9990**(DiHalt Studio, 90초 플레이): 캡처 78장 중 76장이 일치한다. 나머지 2장도 그 시점의 VRAM은 openMSX와 같다(화면 스캔 타이밍 차이).
+- **Another World**(Edd Biddulph, 터보 R, 4분 인트로): 113장 모두 일치한다.
 펌웨어의 렌더러는 스캔보다 2–3줄 앞서 그리므로, 화면 중간의 레지스터 변경은 몇 줄 일찍 적용된다(TODO).
 
 코드의 `VERIFY` 주석은 V9990 Application Manual이나 openMSX와 아직 대조하지 않은 부분이다

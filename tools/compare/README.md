@@ -18,6 +18,9 @@
 | `shot_window.py` | 기록 재생 시 각 캡처 주변 −4~+2 프레임도 함께 렌더링 (캡처 시점 차이 흡수) |
 | `inputs/*.tcl` | 게임별 자동 입력 스크립트 (`V9990_EXTRA_SCRIPT`로 지정) |
 | `games/chasehq.sh` | 실제 게임 회귀 테스트: Chase H.Q. V9990 (ROM은 공식 릴리스에서 받아 SHA1 확인) |
+| `games/anotherworld.sh` | 실제 게임 회귀 테스트: Another World (터보 R + V9990 + OPL4, ROM 경로를 인자로) |
+| `setup_machines.sh`, `make_cbios_turbor.py` | 시스템 ROM 없이 쓰는 테스트 머신: C-BIOS를 고친 터보 R(R800), 웨이브 ROM 없는 MoonSound |
+| `compare_vram.py` | 기록 시점마다 openMSX VRAM과 우리 VRAM을 바이트 단위로 비교 (`V9990_DUMP_VRAM=1`, `REPLAY_DUMP_VRAM=1`) |
 
 트레이스 형식(한 줄에 한 동작): `w <포트> <값>`, `r <포트>`, `frame`, `wait_ce`, `shot <이름>`.
 자세한 내용은 `host/replay.c` 머리말 참고.
@@ -58,15 +61,27 @@ tools/compare/selftest_record.sh
 대상은 P1 2레이어, 스크롤, P2, 스프라이트(앞/뒤 우선순위 포함), BD16, BP4(B3), LMMV, LMMM이다.
 기록 자체 테스트(Z80 실행 → 기록 → 재생)도 일치한다.
 
-**실제 게임: Chase H.Q. V9990** (`games/chasehq.sh`, 90초 자동 플레이, V9990 쓰기 91만 회, 캡처 78장)
+**실제 게임 1: Chase H.Q. V9990** (`games/chasehq.sh`, 90초 자동 플레이, V9990 쓰기 91만 회, 캡처 78장)
 
 | 결과 | 장수 | 내용 |
 |---|---|---|
 | 일치 | 74 | 로고, 타이틀, 크레딧, 브리핑, 주행 화면 |
 | 일치 (티어링) | 2 | 모든 줄이 인접 프레임 중 하나와 일치 (게임이 스캔 중에 다시 그림) |
-| 다름 | 2 | 프레임 경계에 없는 상태. openMSX가 블리터 커맨드를 시간에 걸쳐 실행하는 도중 찍힌 것으로 추정 (우리 코어는 커맨드를 즉시 끝냄) |
+| 다름 | 2 | 화면 스캔 타이밍 차이. **이 시점의 VRAM은 openMSX와 동일**함을 확인 |
 
-이 게임은 B1 모드 BP6에서 LMMM 18,493회(투명색 4,343회), LMMV 4,090회, CMMC 84회, CMMM 40회를 쓴다.
+- 사용 기능: B1 모드 BP6, LMMM 18,493회(투명색 4,343회), LMMV 4,090회, CMMC 84회, CMMM 40회.
+- **VRAM 비교** (`compare_vram.py`, 73개 시점): 69개 시점에서 openMSX와 동일했다.
+  나머지 4개 시점은 1~2줄(22–87바이트)만 달랐는데, openMSX에서 아직 실행 중이던 커맨드로 보인다.
+
+**실제 게임 2: Another World** (Edd Biddulph, 터보 R + V9990 + OPL4) (`games/anotherworld.sh`, 4분 인트로, V9990 쓰기 267만 회)
+
+| 결과 | 장수 |
+|---|---|
+| 일치 | **113 / 113** (로고, 크레딧, 폴리곤 인트로 영상 전체) |
+
+- 사용 기능: B2 모드(384×240, MCS=1) BP4, LMMV 16,128회(XOR), LMMM, LMMC.
+- 실행 환경: 시스템 ROM 없이 C-BIOS를 터보 R로 고친 테스트 머신(R800)과 웨이브 ROM 없는 MoonSound를 썼다.
+- B2 모드에서 openMSX는 첫 줄을 화면 밖으로 잘라 보여 준다. 그래서 세로 위치도 `calib_rows_*`로 줄 단위 보정한다.
 
 ## 알려진 한계
 
