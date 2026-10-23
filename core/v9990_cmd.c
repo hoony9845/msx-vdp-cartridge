@@ -1,9 +1,10 @@
 /*
  * Command engine (blitter).
  *
- * Implemented: STOP, LMMC, LMMV, PSET.
- * TODO: LMCM, LMMM, CMMC, CMMK, CMMM, BMXL, BMLX, BMLL, LINE, SRCH, POINT,
- *       ADVN, P1/P2 coordinate systems, realistic execution timing.
+ * Implemented: STOP, LMMC, LMMV, LMMM, PSET (bitmap coordinate system).
+ * TODO: LMCM, CMMC, CMMK, CMMM, BMXL, BMLX, BMLL, LINE, SRCH, POINT, ADVN,
+ *       P1/P2 coordinate systems (not fully known, see openMSX), realistic
+ *       execution timing.
  *
  * Commands run incrementally via v9990_cmd_step() so the bus loop on core1
  * stays responsive; there is no attempt at cycle-accurate speed yet.
@@ -57,6 +58,17 @@ static void write_pixel(v9990_t *v, unsigned x, unsigned y, unsigned color) {
     v9990_vram_write_bx(v, addr, (uint8_t)((d & ~mask) | (r & mask)));
 }
 
+static unsigned read_pixel(const v9990_t *v, unsigned x, unsigned y) {
+    const unsigned bpp = v9990_bpp(v);
+    const unsigned iw = v9990_image_width(v);
+    x &= iw - 1u;
+    uint32_t bit = ((uint32_t)y * iw + x) * bpp;
+    uint32_t addr = (bit >> 3) & V9990_VRAM_MASK;
+    if (bpp == 16)
+        return v9990_vram_read_bx(v, addr) | (v9990_vram_read_bx(v, addr + 1) << 8);
+    return (v9990_vram_read_bx(v, addr) >> (8u - bpp - (bit & 7u))) & ((1u << bpp) - 1u);
+}
+
 static void finish(v9990_t *v) {
     v->cmd.op = 0;
     V9990_CLR_BITS(v->status, V9990_ST_CE | V9990_ST_TR);
@@ -67,12 +79,17 @@ static void finish(v9990_t *v) {
  * Returns false when the rectangle is complete. */
 static bool advance_rect(v9990_t *v) {
     const uint8_t arg = v->regs[V9990_R_CMD_ARG];
-    v->cmd.x = (uint16_t)(v->cmd.x + ((arg & V9990_ARG_DIX) ? -1 : 1));
+    const int dx = (arg & V9990_ARG_DIX) ? -1 : 1;
+    const int dy = (arg & V9990_ARG_DIY) ? -1 : 1;
+    v->cmd.x = (uint16_t)(v->cmd.x + dx);
+    v->cmd.src_x = (uint16_t)(v->cmd.src_x + dx);
     if (--v->cmd.remaining_x == 0) {
         if (--v->cmd.remaining_y == 0) return false;
         v->cmd.remaining_x = v->cmd.nx;
         v->cmd.x = v->cmd.dx;
-        v->cmd.y = (uint16_t)(v->cmd.y + ((arg & V9990_ARG_DIY) ? -1 : 1));
+        v->cmd.src_x = v->cmd.sx;
+        v->cmd.y = (uint16_t)(v->cmd.y + dy);
+        v->cmd.src_y = (uint16_t)(v->cmd.src_y + dy);
     }
     return true;
 }
@@ -98,6 +115,8 @@ void v9990_cmd_start(v9990_t *v) {
     if (c->ny == 0) c->ny = 4096;   /* VERIFY */
     c->x = c->dx;
     c->y = c->dy;
+    c->src_x = c->sx;
+    c->src_y = c->sy;
     c->remaining_x = c->nx;
     c->remaining_y = c->ny;
     c->data_phase = 0;
@@ -115,6 +134,7 @@ void v9990_cmd_start(v9990_t *v) {
         V9990_SET_BITS(v->status, V9990_ST_TR);
         break;
     case V9990_CMD_LMMV:
+    case V9990_CMD_LMMM:
         break;
     case V9990_CMD_PSET:
         write_pixel(v, c->dx, c->dy, fore_color(v));
@@ -128,6 +148,16 @@ void v9990_cmd_start(v9990_t *v) {
 }
 
 V9990_HOT bool v9990_cmd_step(v9990_t *v, unsigned budget) {
+    if (v->cmd.op == V9990_CMD_LMMM) {
+        while (budget--) {
+            /* write_pixel skips colour 0 when TP is set */
+            write_pixel(v, v->cmd.x, v->cmd.y, read_pixel(v, v->cmd.src_x, v->cmd.src_y));
+            if (!advance_rect(v)) {
+                finish(v);
+                return false;
+            }
+        }
+    }
     if (v->cmd.op == V9990_CMD_LMMV) {
         unsigned color = fore_color(v);
         while (budget--) {

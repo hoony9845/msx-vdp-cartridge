@@ -72,16 +72,23 @@ cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
 
 | 영역 | 상태 |
 |---|---|
-| 포트 P#0–P#7, 레지스터 자동 증가, VRAM 읽기/쓰기, 팔레트 | ✅ (PC 테스트) |
+| 포트 P#0–P#7, 레지스터 쓰기 마스크, VRAM 포인터(R#2/R#5에서 갱신), 팔레트 | ✅ (PC 테스트) |
+| 표시 모드 판정 (P1, P2, B1–B7, MCS 포함, 매뉴얼 8.3 표) | ✅ (PC 테스트) |
 | 인터럽트 (VI, HI, CE), 상태 레지스터 | ✅ 기본 |
-| 비트맵 렌더링 BP2/BP4/BP6/BD8/BD16, 스크롤 | ✅ (PC 테스트) |
-| 커맨드: STOP, LMMC, LMMV, PSET | ✅ 기본 |
+| P1 모드: 2레이어, 레이어별 팔레트, 앞/뒤 영역(R#27), 스크롤 | ✅ (PC 테스트) |
+| P2 모드: 1024×512 이미지, 짝수/홀수 바이트 팔레트 | ✅ (PC 테스트) |
+| P1/P2 스프라이트: 125개, 줄당 16개, 앞/뒤 우선순위, 팔레트 | ✅ (PC 테스트) |
+| 세로 스크롤 분할(라인 중간 SCAY 쓰기), R512/R256 롤 | ✅ (PC 테스트) |
+| 비트맵 렌더링 BP2/BP4/BP6/BD8/BD16 | ✅ (PC 테스트) |
+| 커맨드: STOP, LMMC, LMMV, LMMM, PSET (비트맵 좌표계) | ✅ 기본 |
 | 펌웨어: PIO 버스, DVI 출력, PSRAM, 듀얼 코어 | ✅ 빌드됨, **실기 미검증** |
-| P1/P2 패턴 모드, 스프라이트, 커서 | ⬜ TODO |
-| YJK/YUV 색 모드 | ⬜ TODO |
-| 커맨드: LMCM, LMMM, CMMx, BMxx, LINE, SRCH, POINT, ADVN | ⬜ TODO |
-| 커맨드 실행 시간, HR 비트, 정확한 라인 타이밍 | ⬜ TODO |
+| 비트맵 커서, YJK/YUV, R#16 화면 위치 조정 | ⬜ TODO |
+| 커맨드: LMCM, CMMx, BMxx, LINE, SRCH, POINT, ADVN, P1/P2 좌표계 | ⬜ TODO |
+| 커맨드 실행 시간, HR 비트, 라인 타이밍 정밀도 | ⬜ TODO |
 | 15kHz RGB 출력 (PIO + 저항 DAC) | ⬜ 선택 사항 |
+
+기준 자료: Yamaha V9990 Application Manual(1992), 매뉴얼에 없는 동작은 openMSX의 구현을 참고했다.
+펌웨어의 렌더러는 스캔보다 2–3줄 앞서 그리므로, 화면 중간의 레지스터 변경은 몇 줄 일찍 적용된다(TODO).
 
 코드의 `VERIFY` 주석은 V9990 Application Manual이나 openMSX와 아직 대조하지 않은 부분이다
 (표시 모드 표, 비트 순서, NX/NY=0의 의미 등).

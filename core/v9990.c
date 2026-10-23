@@ -52,7 +52,7 @@ static void update_read_ptr(v9990_t *v) {
 /* ------------------------------------------------------------------ */
 
 static void palette_advance(v9990_t *v) {
-    if (v->regs[V9990_R_PALETTE_CTRL] & 0x10) return;   /* PLTAIH -- VERIFY */
+    if (v->regs[V9990_R_PALETTE_CTRL] & 0x10) return;   /* PLTAIH */
     uint8_t p = (uint8_t)(v->regs[V9990_R_PALETTE_PTR] + 1);
     if ((p & 3) == 3) p++;
     v->regs[V9990_R_PALETTE_PTR] = p;
@@ -86,22 +86,25 @@ static void palette_write(v9990_t *v, uint8_t data) {
 /* Registers                                                           */
 /* ------------------------------------------------------------------ */
 
+static const uint8_t reg_write_mask[32] = V9990_REG_WRITE_MASKS;
+
 static void write_reg(v9990_t *v, uint8_t reg, uint8_t data) {
     reg &= V9990_REGSEL_MASK;
+    if (reg < 32) data &= reg_write_mask[reg];
     v->regs[reg] = data;
     switch (reg) {
-    case V9990_R_VRAM_WRITE_ADDR0:
-    case V9990_R_VRAM_WRITE_ADDR1:
-    case V9990_R_VRAM_WRITE_ADDR2:
+    case V9990_R_VRAM_WRITE_ADDR2:          /* pointer only updates on R#2 */
         update_write_ptr(v);
         break;
-    case V9990_R_VRAM_READ_ADDR0:
-    case V9990_R_VRAM_READ_ADDR1:
-        update_read_ptr(v);
-        break;
-    case V9990_R_VRAM_READ_ADDR2:
+    case V9990_R_VRAM_READ_ADDR2:           /* pointer only updates on R#5 */
         update_read_ptr(v);
         prefetch_read(v);
+        break;
+    case V9990_R_SCROLL_AY_LO:              /* restart layer A at this line */
+        v->line_offset_a = v->cur_line;
+        break;
+    case V9990_R_SCROLL_BY_LO:              /* restart layer B at this line */
+        v->line_offset_b = v->cur_line;
         break;
     case V9990_R_CMD_OP:
         v9990_cmd_start(v);
@@ -198,32 +201,25 @@ V9990_HOT uint8_t v9990_read_port(v9990_t *v, uint8_t port) {
 /* Display mode decoding                                               */
 /* ------------------------------------------------------------------ */
 
-/*
- * VERIFY: provisional mapping, check against the "Display mode" table of
- * the application manual. Assumes DCKM 0=XTAL/4, 1=XTAL/2, 2=XTAL/1.
- */
+/* Display mode from R#6/R#7 and the MCS bit of P#7 (manual 8.3). */
 v9990_display_mode_t v9990_display_mode(const v9990_t *v) {
     uint8_t r6 = v->regs[V9990_R_SCREEN_MODE0];
     uint8_t r7 = v->regs[V9990_R_SCREEN_MODE1];
+    bool mcs = (v->sys_ctrl & V9990_SYS_MCS) != 0;
     switch (V9990_DSPM(r6)) {
     case 0: return V9990_MODE_P1;
     case 1: return V9990_MODE_P2;
     case 3: return V9990_MODE_STANDBY;
     default: break;
     }
-    if (r7 & V9990_R7_HSCN) {
-        if (r7 & V9990_R7_C25M)
-            return (r7 & V9990_R7_PAL) ? V9990_MODE_B6 : V9990_MODE_B5;
-        switch (V9990_DCKM(r6)) {
-        case 0:  return V9990_MODE_B2;
-        case 1:  return V9990_MODE_B4;
-        default: return V9990_MODE_B7;
-        }
-    }
+    if (r7 & V9990_R7_HSCN)                       /* 31kHz modes */
+        return (r7 & V9990_R7_C25M) ? V9990_MODE_B6 : V9990_MODE_B5;
     switch (V9990_DCKM(r6)) {
-    case 0:  return V9990_MODE_B1;
-    case 1:  return V9990_MODE_B3;
-    default: return V9990_MODE_B0;
+    case 0:  return V9990_MODE_B1;                /* XTAL/4: 256 */
+    case 1:  return mcs ? V9990_MODE_B2           /* MCKIN/2: 384 */
+                        : V9990_MODE_B3;          /* XTAL/2: 512 */
+    default: return mcs ? V9990_MODE_B4           /* MCKIN: 768 */
+                        : V9990_MODE_B7;          /* XTAL: 1024 (undocumented) */
     }
 }
 
@@ -260,7 +256,7 @@ unsigned v9990_display_width(const v9990_t *v) {
     case V9990_MODE_P2: case V9990_MODE_B3: return 512;
     case V9990_MODE_B4: return 768;
     case V9990_MODE_B5: case V9990_MODE_B6: return 640;
-    case V9990_MODE_B0: case V9990_MODE_B7: return 1024;
+    case V9990_MODE_B7: return 1024;
     default: return 256;
     }
 }
@@ -273,7 +269,10 @@ unsigned v9990_display_height(const v9990_t *v) {
     case V9990_MODE_B2: case V9990_MODE_B4: h = 240; break;
     default: h = 212; break;
     }
-    if (v->regs[V9990_R_SCREEN_MODE1] & V9990_R7_IL) h *= 2;  /* VERIFY */
+    /* EO + IL: twice the vertical resolution (not in B5/B6) */
+    if ((v->regs[V9990_R_SCREEN_MODE1] & (V9990_R7_IL | V9990_R7_EO)) ==
+        (V9990_R7_IL | V9990_R7_EO))
+        h *= 2;
     return h;
 }
 
@@ -287,12 +286,19 @@ void v9990_video_vblank_start(v9990_t *v) {
 }
 
 void v9990_video_vblank_end(v9990_t *v) {
+    /* new frame: line counters restart, high scroll bytes are latched */
+    v->cur_line = 0;
+    v->line_offset_a = 0;
+    v->line_offset_b = 0;
+    v->scroll_ay_high = v->regs[V9990_R_SCROLL_AY_HI];
+    v->scroll_by_high = v->regs[V9990_R_SCROLL_BY_HI];
     V9990_CLR_BITS(v->status, V9990_ST_VR);
     if (v->regs[V9990_R_SCREEN_MODE1] & V9990_R7_EO)
         V9990_XOR_BITS(v->status, V9990_ST_EO);
 }
 
 void v9990_video_line_start(v9990_t *v, unsigned line) {
+    v->cur_line = (uint16_t)line;
     unsigned il = v->regs[V9990_R_INT_LINE_LO] |
                   ((v->regs[V9990_R_INT_LINE_HI] & 0x03u) << 8);
     /* TODO: IEHM / horizontal position (R#12), HR status bit */

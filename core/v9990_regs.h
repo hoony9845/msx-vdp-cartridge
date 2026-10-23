@@ -54,7 +54,7 @@ enum {
     V9990_R_CONTROL          = 8,   /* DISP(7) SPD(6) YSE(5) VWTE(4) VWM(3) DMAE(2) VSL(1-0) */
     V9990_R_INT_ENABLE       = 9,   /* IECE(2) IEH(1) IEV(0) */
     V9990_R_INT_LINE_LO      = 10,
-    V9990_R_INT_LINE_HI      = 11,  /* IEHM(7) IL9-8(1-0) -- VERIFY */
+    V9990_R_INT_LINE_HI      = 11,  /* IEHM(7) IL9-8(1-0) */
     V9990_R_INT_X            = 12,
     V9990_R_PALETTE_CTRL     = 13,  /* PLTM(7-6) YAE(5) PLTAIH(4) PLTO5-2(3-0) */
     V9990_R_PALETTE_PTR      = 14,
@@ -65,13 +65,13 @@ enum {
     V9990_R_SCROLL_AX_LO     = 19,  /* SCAX2-0 (2-0) */
     V9990_R_SCROLL_AX_HI     = 20,  /* SCAX10-3 */
     V9990_R_SCROLL_BY_LO     = 21,
-    V9990_R_SCROLL_BY_HI     = 22,
-    V9990_R_SCROLL_BX_LO     = 23,
-    V9990_R_SCROLL_BX_HI     = 24,
-    V9990_R_SPRITE_PGT       = 25,
+    V9990_R_SCROLL_BY_HI     = 22,  /* SCBY8 (0) */
+    V9990_R_SCROLL_BX_LO     = 23,  /* SCBX2-0 (2-0) */
+    V9990_R_SCROLL_BX_HI     = 24,  /* SCBX8-3 (5-0) */
+    V9990_R_SPRITE_PGT       = 25,  /* P1: SGBA17-15 (3-1), P2: SGBA18-15 (3-0) */
     V9990_R_LCD_CTRL         = 26,
-    V9990_R_PRIORITY_CTRL    = 27,
-    V9990_R_SPRITE_PAL_CTRL  = 28,
+    V9990_R_PRIORITY_CTRL    = 27,  /* PRY1-0 (3-2) PRX1-0 (1-0), units of 64 dots */
+    V9990_R_SPRITE_PAL_CTRL  = 28,  /* CSPO5-2: cursor palette offset */
     /* command engine parameters */
     V9990_R_CMD_SX0 = 32, V9990_R_CMD_SX1 = 33,
     V9990_R_CMD_SY0 = 34, V9990_R_CMD_SY1 = 35,
@@ -85,9 +85,27 @@ enum {
     V9990_R_CMD_FC0 = 48, V9990_R_CMD_FC1 = 49,
     V9990_R_CMD_BC0 = 50, V9990_R_CMD_BC1 = 51,
     V9990_R_CMD_OP  = 52,           /* CM3-0 (7-4); writing starts the command */
-    V9990_R_CMD_BX0 = 53, V9990_R_CMD_BX1 = 54, /* SRCH result (read) -- VERIFY */
+    V9990_R_CMD_BX0 = 53, V9990_R_CMD_BX1 = 54, /* SRCH result (read only) */
     V9990_NUM_REGS  = 64
 };
+
+/* Writable bits of R#0-R#31 (read-back mask measured on real hardware,
+ * as documented in openMSX). */
+#define V9990_REG_WRITE_MASKS { \
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, \
+    0xFF, 0x87, 0xFF, 0x83, 0x0F, 0xFF, 0xFF, 0xFF, \
+    0xFF, 0xFF, 0xDF, 0x07, 0xFF, 0xFF, 0xC1, 0x07, \
+    0x3F, 0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }
+
+/* VRAM layout of the pattern modes (CPU / logical addresses) */
+#define V9990_P1_PGT_A      0x00000u
+#define V9990_P1_PGT_B      0x40000u
+#define V9990_P1_SPAT       0x3FE00u
+#define V9990_P1_PNT_A      0x7C000u
+#define V9990_P1_PNT_B      0x7E000u
+#define V9990_P2_PGT        0x00000u
+#define V9990_P2_SPAT       0x7BE00u
+#define V9990_P2_PNT        0x7C000u
 
 /* R#6 fields */
 #define V9990_DSPM(r6)  (((r6) >> 6) & 3)   /* 0=P1 1=P2 2=bitmap 3=standby */
@@ -104,7 +122,11 @@ enum {
 
 /* R#8 fields */
 #define V9990_R8_DISP 0x80
-#define V9990_R8_SPD  0x40
+#define V9990_R8_SPD  0x40      /* sprite / cursor disable */
+
+/* Sprite attribute byte 3 */
+#define V9990_SPR_PR0 0x10      /* not displayed */
+#define V9990_SPR_PR1 0x20      /* behind the front pattern layer */
 
 /* R#44 ARG */
 #define V9990_ARG_DIY 0x08

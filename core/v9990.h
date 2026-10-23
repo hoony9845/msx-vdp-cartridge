@@ -33,9 +33,9 @@
 
 typedef enum {
     V9990_MODE_P1, V9990_MODE_P2,
-    V9990_MODE_B0, /* undocumented 1024-wide */
     V9990_MODE_B1, V9990_MODE_B2, V9990_MODE_B3, V9990_MODE_B4,
-    V9990_MODE_B5, V9990_MODE_B6, V9990_MODE_B7,
+    V9990_MODE_B5, V9990_MODE_B6,
+    V9990_MODE_B7,      /* undocumented: DCKM=2 without HSCN, 1024 wide */
     V9990_MODE_STANDBY
 } v9990_display_mode_t;
 
@@ -53,7 +53,8 @@ typedef struct {
 typedef struct {
     uint8_t  op;            /* active command (0 = idle) */
     uint16_t sx, sy, dx, dy, nx, ny;
-    uint16_t x, y;          /* current position (relative counters) */
+    uint16_t x, y;          /* current destination position */
+    uint16_t src_x, src_y;  /* current source position (LMMM) */
     uint16_t remaining_x, remaining_y;
     uint16_t data_word;     /* LMMC/LMCM 16bpp byte assembly */
     uint8_t  data_phase;
@@ -78,6 +79,14 @@ typedef struct v9990 {
 
     uint8_t  cmd_read_latch;    /* next byte for P#2 read (LMCM/POINT) */
     v9990_cmd_state_t cmd;
+
+    /* Video timing state (written by core0's video driver) */
+    volatile uint16_t cur_line;       /* display line being started */
+    /* Writing the low byte of a vertical scroll register restarts that
+     * layer's line counter at the current line (verified on hardware
+     * according to openMSX); the high bytes are latched per frame. */
+    volatile uint16_t line_offset_a, line_offset_b;
+    uint8_t  scroll_ay_high, scroll_by_high;
 } v9990_t;
 
 /* ---- lifecycle ---- */
