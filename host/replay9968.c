@@ -23,10 +23,23 @@
 
 static uint8_t vram[V9968_VRAM_SIZE];
 static v9968_t vdp;
+static FILE *geo_log;       /* REPLAY_GEO3D_CMDS: geo3d's commands, tb_cmd.v format */
 
 /* Commands and geo3d run until done or waiting for CPU data. */
 static void run_cmd(void) {
     for (int i = 0; i < 1000000; i++) {
+        if (geo_log && vdp.geo.running && !v9968_cmd_busy(&vdp)) {
+            /* issue the command here to log it (what v9968_service does) */
+            uint8_t b[GEO3D_CMD_MAX];
+            unsigned n = geo3d_next_command(&vdp.geo, b);
+            if (n == 0) vdp.geo.running = false;
+            for (unsigned k = 0; k < n; k++) {
+                unsigned r = geo3d_command_reg(n, k);
+                fprintf(geo_log, "W %u %02x\n", r, b[k]);
+                v9968_cmd_write_reg(&vdp, r, b[k]);
+            }
+            if (n) fputs("E\n", geo_log);
+        }
         if (!v9968_service(&vdp, 1u << 20) && !vdp.geo.running) break;
     }
 }
@@ -98,6 +111,7 @@ int main(int argc, char **argv) {
     v9968_init(&vdp, vram);
     vdp.gamma = false;
     v9968_video_vblank_end(&vdp);
+    if (getenv("REPLAY_GEO3D_CMDS")) geo_log = fopen(getenv("REPLAY_GEO3D_CMDS"), "w");
 
     char buf[512];
     unsigned lineno = 0, writes = 0, reads = 0, frames = 0;

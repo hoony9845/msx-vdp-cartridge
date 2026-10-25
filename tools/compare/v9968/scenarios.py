@@ -345,6 +345,20 @@ def yjk_scene(yae):
     return t
 
 
+def yjk_sprite_colours(yae):
+    """Sprites of colours 1-15 (mode 2) over a black YJK picture."""
+    t = Trace()
+    reset(t)
+    screen(t, "G7", sprites=True, tables={2: 0x1F, 5: 0xF7, 11: 0x01, 6: 0x1E, 7: 0x00})
+    t.reg(25, 0x18 if yae else 0x08)
+    t.vram_write(0xF000, [0xFF] * 8)                       # pattern 0: solid
+    t.vram_write(0xF800, sum(([c] * 16 for c in range(32)), []))
+    t.vram_write(0xFA00, sum(([60, c * 16, 0, 0] for c in range(16)), []) + [216, 0, 0, 0])
+    t.frame(2)
+    t.shot("yae_sprite_colours" if yae else "yjk_sprite_colours")
+    return t
+
+
 def hscroll(sp2):
     def extra(t):
         t.reg(26, 0x05 if not sp2 else 0x23)
@@ -600,6 +614,8 @@ SCENARIOS = {
     "graphic7": lambda: bitmap_scene("G7", "graphic7"),
     "yjk": lambda: yjk_scene(False),
     "yae": lambda: yjk_scene(True),
+    "yjk_sprite_colours": lambda: yjk_sprite_colours(False),
+    "yae_sprite_colours": lambda: yjk_sprite_colours(True),
     "hscroll_msk": lambda: hscroll(False),
     "hscroll_sp2": lambda: hscroll(True),
     "vscroll_r23": vscroll,

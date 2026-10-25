@@ -386,7 +386,8 @@ static void test_render_yjk(void) {
     for (int i = 0; i < 4; i++) vout(&vdp, 0x88, 16 << 3);
     v9968_render_line(&vdp, 0, line, 640);
     unsigned b = (5 * 16 + 2) >> 2;
-    CHECK_EQ(line[64], c565(16, 16, b));
+    CHECK_EQ(line[64], pal(0));                               /* 4 dots late: border */
+    CHECK_EQ(line[64 + 8], c565(16, 16, b));
 }
 
 static void test_sprites_mode2(void) {

@@ -290,7 +290,10 @@ static void yjk_to_c15(const v9968_t *v, unsigned start, unsigned n, uint16_t *c
         for (unsigned i = 0; i < 4 && g + i < n; i++) {
             uint8_t b = p[i];
             if (yae && (b & 0x08)) {
-                c[start + g + i] = v->palette[b >> 4];
+                /* palette dot; colour 0 is transparent like in SCREEN 5 */
+                unsigned idx = b >> 4;
+                if (idx == 0 && !(v->regs[8] & 0x20)) idx = v->regs[7] & 15;
+                c[start + g + i] = v->palette[idx];
                 continue;
             }
             int y = yae ? (b >> 4) << 1 : b >> 3;
@@ -430,7 +433,6 @@ static void render_sprites(const line_t *l, bool *any) {
     memset(spr_on, 0, sizeof(spr_on));
     memset(spr_fix, 0, sizeof(spr_fix));
     bool cc0_found = false;
-    unsigned ho = l->ho_l;
 
     for (unsigned s = 0; s < nsel; s++) {
         const sel_t *p = &sel[s];
@@ -454,7 +456,7 @@ static void render_sprites(const line_t *l, bool *any) {
                 uint8_t nib = (d & 1) ? (pb[d >> 1] & 15) : (pb[d >> 1] >> 4);
                 if (!nib) continue;
                 if (spr_on[sx]) {
-                    if (spr_col[sx] & 15) sprite_collision(v, sx + ho, l->py);
+                    if (spr_col[sx] & 15) sprite_collision(v, sx, l->py);
                     continue;
                 }
                 spr_on[sx] = 1;
@@ -496,7 +498,7 @@ static void render_sprites(const line_t *l, bool *any) {
             bool opaque = dot && (c != 0 || tp);
             if (dot && !first && spr_on[px] && !ic && !cc &&
                 ((spr_col[px] & 15) != 0 || tp))
-                sprite_collision(v, px + ho, l->py);
+                sprite_collision(v, px, l->py);
             if (first) {
                 if (!cc && opaque) { spr_on[px] = 1; spr_col[px] = (uint8_t)(set << 4 | c); }
                 continue;
@@ -588,14 +590,20 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
     /* background, in source dots from ho_l on */
     unsigned dots = 256 - l.ho_l;
     bool tp = v->regs[8] & 0x20;
-    bool fixed = g7_fixed(v, l.mode);
+    bool fixed = g7_fixed(v, l.mode);       /* over YJK sprites use the palette */
     if (l.mode <= V9968_MODE_G3 || l.mode == V9968_MODE_MC) render_pattern(&l, dots);
     else                                                   render_bitmap(&l, dots);
 
     unsigned sub = hires ? 2 : 1;
     unsigned first = l.ho_l * sub, count = dots * sub;
     if (l.mode == V9968_MODE_G7) {
-        if (v->regs[25] & 0x08)      yjk_to_c15(v, first, count, c);
+        if (v->regs[25] & 0x08) {
+            /* J and K need a whole 4-dot group: the YJK picture comes out 4
+             * dots late, the first 4 dots show the border (the RTL's delay
+             * line; openMSX shows the same) */
+            yjk_to_c15(v, first + 4, count - 4, c);
+            for (unsigned i = 0; i < 4; i++) c[first + i] = bl;
+        }
         else if (v9968_epal(v))      for (unsigned i = 0; i < count; i++) c[first + i] = v->palette[bg_idx[i]];
         else                         for (unsigned i = 0; i < count; i++) c[first + i] = g7_c15(bg_idx[i]);
     } else {
@@ -612,9 +620,13 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
     if (!(v->regs[8] & 0x02)) render_sprites(&l, &any);
     if (any) {
         bool sp3 = v9968_sp3(v);
-        for (unsigned sx = 0; sx + l.ho_l < 256; sx++) {
+        /* sprites ignore R#27 (vdp_sprite_makeup_pixel gets the unscrolled
+         * position) but are hidden in the border it opens at the left; over
+         * YJK they come out 4 dots late with the picture (as in openMSX) */
+        unsigned delay = (l.mode == V9968_MODE_G7 && (v->regs[25] & 0x08)) ? 4 : 0;
+        for (unsigned x = l.ho_l + delay; x < 256; x++) {
+            unsigned sx = x - delay;
             if (!spr_on[sx]) continue;
-            unsigned x = sx + l.ho_l;
             uint8_t col = spr_col[sx];
             if (fixed) {
                 c[x] = g7_c15(g7_sprite[col & 15]);
