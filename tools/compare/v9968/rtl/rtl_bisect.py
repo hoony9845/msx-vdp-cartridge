@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Find the first command after which the RTL and core/v9968_cmd.c disagree.
 
-    bisect.py <run_dir> <mode> <v256> <hs> <R#12>
+    rtl_bisect.py <run_dir> <mode> <v256> <hs> <R#12>
 
 run_dir is a directory made by run.sh (cmds.txt, init.hex). Prints the
 command (index and registers) after which the VRAM or the log first differ.
