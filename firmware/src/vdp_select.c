@@ -1,0 +1,111 @@
+/*
+ * VDP selection setting (see vdp_select.h).
+ *
+ * Writing flash stalls XIP, which the bus core and the video IRQ cannot
+ * afford while running. So a new choice only goes to a watchdog scratch
+ * register; after the reboot, vdp_select_boot() writes it to flash while
+ * nothing else runs yet.
+ */
+#include <stdio.h>
+#include <string.h>
+#include "pico/stdlib.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+#include "hardware/watchdog.h"
+#include "vdp_select.h"
+
+#define SETTING_OFFSET  (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+#define SETTING_MAGIC   0x56445053u          /* "VDPS" */
+#define PENDING_MAGIC   0x50454E44u          /* "PEND" in scratch[0] */
+
+#ifndef MSX_VDP_DEFAULT_V9968
+#define MSX_VDP_DEFAULT_V9968 0
+#endif
+
+typedef struct {
+    uint32_t magic;
+    uint32_t chip;
+    uint32_t check;                          /* ~chip */
+} setting_t;
+
+static vdp_chip_t default_chip(void) {
+    return MSX_VDP_DEFAULT_V9968 ? VDP_CHIP_V9968 : VDP_CHIP_V9990;
+}
+
+static bool read_setting(vdp_chip_t *chip) {
+    const setting_t *s = (const setting_t *)(XIP_BASE + SETTING_OFFSET);
+    if (s->magic != SETTING_MAGIC || s->check != ~s->chip || s->chip > VDP_CHIP_V9968)
+        return false;
+    *chip = (vdp_chip_t)s->chip;
+    return true;
+}
+
+static void write_setting(vdp_chip_t chip) {
+    static uint8_t page[FLASH_PAGE_SIZE];
+    memset(page, 0xFF, sizeof page);
+    setting_t s = { SETTING_MAGIC, (uint32_t)chip, ~(uint32_t)chip };
+    memcpy(page, &s, sizeof s);
+    uint32_t irq = save_and_disable_interrupts();
+    flash_range_erase(SETTING_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(SETTING_OFFSET, page, FLASH_PAGE_SIZE);
+    restore_interrupts(irq);
+}
+
+vdp_chip_t vdp_select_boot(void) {
+    if (watchdog_hw->scratch[0] == PENDING_MAGIC) {
+        vdp_chip_t want = (vdp_chip_t)(watchdog_hw->scratch[1] & 1);
+        watchdog_hw->scratch[0] = 0;
+        vdp_chip_t have;
+        if (!read_setting(&have) || have != want) write_setting(want);
+    }
+    vdp_chip_t chip;
+    return read_setting(&chip) ? chip : default_chip();
+}
+
+const char *vdp_chip_name(vdp_chip_t chip) {
+    return chip == VDP_CHIP_V9968 ? "V9968 + geo3d v2.0" : "V9990";
+}
+
+static void switch_to(vdp_chip_t chip) {
+    printf("switching to %s, rebooting\n", vdp_chip_name(chip));
+    stdio_flush();
+    watchdog_hw->scratch[0] = PENDING_MAGIC;
+    watchdog_hw->scratch[1] = (uint32_t)chip;
+    watchdog_reboot(0, 0, 10);
+    for (;;) tight_loop_contents();
+}
+
+/* "chip v9990" | "chip v9968" | "chip" (show) */
+static void command(const char *line, vdp_chip_t current) {
+    while (*line == ' ') line++;
+    if (strncmp(line, "chip", 4) != 0) {
+        if (*line) printf("commands: chip [v9990|v9968]\n");
+        return;
+    }
+    line += 4;
+    while (*line == ' ') line++;
+    if (strcmp(line, "v9990") == 0 || strcmp(line, "V9990") == 0) {
+        if (current != VDP_CHIP_V9990) switch_to(VDP_CHIP_V9990);
+    } else if (strcmp(line, "v9968") == 0 || strcmp(line, "V9968") == 0) {
+        if (current != VDP_CHIP_V9968) switch_to(VDP_CHIP_V9968);
+    } else if (*line) {
+        printf("unknown chip '%s' (v9990 or v9968)\n", line);
+        return;
+    }
+    printf("chip: %s\n", vdp_chip_name(current));
+}
+
+void vdp_select_poll(vdp_chip_t current) {
+    static char buf[32];
+    static unsigned len;
+    int c;
+    while ((c = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
+        if (c == '\r' || c == '\n') {
+            buf[len] = 0;
+            command(buf, current);
+            len = 0;
+        } else if (len < sizeof buf - 1) {
+            buf[len++] = (char)c;
+        }
+    }
+}

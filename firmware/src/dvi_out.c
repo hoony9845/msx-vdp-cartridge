@@ -1,9 +1,10 @@
 /*
  * 640x480@60 DVI output over HSTX with scanline buffers.
  * Based on pico-examples/hstx/dvi_out_hstx_encoder, changed to RGB565 and
- * to feed V9990 lines (line doubled when the picture is <= 240 lines tall).
+ * to feed VDP lines (line doubled when the picture is <= 240 lines tall).
  *
- * The DMA IRQ also drives V9990 timing: vblank start/end and line events.
+ * The DMA IRQ also drives the VDP's timing: vblank start/end and line
+ * events, through the callbacks of dvi_vdp_t.
  */
 #include <string.h>
 #include "pico/stdlib.h"
@@ -68,7 +69,7 @@ static uint32_t vactive_line[] = {
 
 dvi_lines_t dvi_lines;
 
-static v9990_t *vdp;
+static const dvi_vdp_t *vdp;
 static uint dma_ping, dma_pong;
 static bool dma_pong_next;
 static uint v_scanline = 2;
@@ -79,12 +80,13 @@ static uint32_t pic_top, pic_scale, pic_height;
 static bool pic_active;
 
 static void __not_in_flash_func(latch_frame_geometry)(void) {
-    uint32_t h = v9990_display_height(vdp);
+    uint32_t h = vdp->height(vdp->vdp);
     if (h > DVI_HEIGHT) h = DVI_HEIGHT;
     pic_scale = (h <= DVI_HEIGHT / 2) ? 2 : 1;
     pic_height = h;
     pic_top = (DVI_HEIGHT - h * pic_scale) / 2;
     dvi_lines.src_height = h;
+    dvi_lines.scale = pic_scale;
 }
 
 static void __not_in_flash_func(end_picture)(void) {
@@ -92,12 +94,31 @@ static void __not_in_flash_func(end_picture)(void) {
     pic_active = false;
     dvi_lines.src_line = -1;
     dvi_lines.frame++;
-    v9990_video_vblank_start(vdp);
+    vdp->vblank_start(vdp->vdp);
 }
 
-/* Returns the pixel data for output line y (0..479) and fires V9990 events. */
+/* Just-in-time mode: events for line n + 1 as line n starts on screen. */
+static void __not_in_flash_func(jit_events)(int32_t rel) {
+    int32_t sub = rel & (int32_t)(pic_scale - 1);
+    int32_t vline = (rel - sub) / (int32_t)pic_scale;
+    if (vdp->hblank) vdp->hblank(vdp->vdp, pic_scale == 2 ? sub == 0 : (rel & 1) == 0);
+    if (sub != 0) return;
+    int32_t next = vline + 1;
+    if (next == 0) {
+        pic_active = true;
+        vdp->vblank_end(vdp->vdp);
+    }
+    if (next >= 0 && next < (int32_t)pic_height) vdp->line(vdp->vdp, (unsigned)next);
+}
+
+/* Returns the pixel data for output line y (0..479) and fires VDP events. */
 static const uint16_t *__not_in_flash_func(active_line)(uint32_t y) {
     if (y == 0) latch_frame_geometry();
+
+    int32_t rel = (int32_t)y - (int32_t)pic_top;
+    dvi_lines.pos = rel;
+    if (vdp->just_in_time && rel >= -2 * (int32_t)pic_scale)
+        jit_events(rel);
 
     uint32_t end = pic_top + pic_height * pic_scale;
     if (y < pic_top || y >= end) {
@@ -105,15 +126,16 @@ static const uint16_t *__not_in_flash_func(active_line)(uint32_t y) {
         return dvi_lines.border;
     }
 
-    uint32_t rel = y - pic_top;
-    uint32_t src = rel / pic_scale;
-    if (rel % pic_scale == 0) {
-        if (src == 0) {
-            pic_active = true;
-            v9990_video_vblank_end(vdp);
+    uint32_t src = (uint32_t)rel / pic_scale;
+    if ((uint32_t)rel % pic_scale == 0) {
+        if (!vdp->just_in_time) {
+            if (src == 0) {
+                pic_active = true;
+                vdp->vblank_end(vdp->vdp);
+            }
+            vdp->line(vdp->vdp, src);
         }
         dvi_lines.src_line = (int32_t)src;
-        v9990_video_line_start(vdp, src);
     }
     return dvi_lines.line[src & (DVI_LINE_BUFFERS - 1)];
 }
@@ -152,7 +174,7 @@ static void assign_pair(uint pin, uint32_t sel) {
     hstx_ctrl_hw->bit[bit + 1] = sel | HSTX_CTRL_BIT0_INV_BITS;
 }
 
-void dvi_out_start(v9990_t *v) {
+void dvi_out_start(const dvi_vdp_t *v) {
     vdp = v;
     dvi_lines.src_line = -1;
     latch_frame_geometry();

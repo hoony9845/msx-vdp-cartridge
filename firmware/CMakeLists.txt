@@ -20,9 +20,14 @@ add_executable(msx_v9990
     src/bus.c
     src/dvi_out.c
     src/psram.c
+    src/vdp_select.c
     ${CORE_DIR}/v9990.c
     ${CORE_DIR}/v9990_cmd.c
     ${CORE_DIR}/v9990_render.c
+    ${CORE_DIR}/v9968.c
+    ${CORE_DIR}/v9968_cmd.c
+    ${CORE_DIR}/v9968_render.c
+    ${CORE_DIR}/geo3d.c
 )
 
 pico_generate_pio_header(msx_v9990 ${CMAKE_CURRENT_LIST_DIR}/src/bus.pio)
@@ -35,12 +40,23 @@ if(V9990_PSRAM_CS_PIN)
     target_compile_definitions(msx_v9990 PRIVATE V9990_PSRAM_CS_PIN=${V9990_PSRAM_CS_PIN})
 endif()
 
+# VDP emulated when no choice was saved in flash (USB serial: chip v9990|v9968)
+set(MSX_VDP_DEFAULT "V9990" CACHE STRING "Default VDP: V9990 or V9968")
+set_property(CACHE MSX_VDP_DEFAULT PROPERTY STRINGS V9990 V9968)
+if(MSX_VDP_DEFAULT STREQUAL "V9968")
+    target_compile_definitions(msx_v9990 PRIVATE MSX_VDP_DEFAULT_V9968=1)
+elseif(NOT MSX_VDP_DEFAULT STREQUAL "V9990")
+    message(FATAL_ERROR "MSX_VDP_DEFAULT must be V9990 or V9968")
+endif()
+
 target_link_libraries(msx_v9990
     pico_stdlib
     pico_multicore
     hardware_pio
     hardware_dma
     hardware_clocks
+    hardware_flash
+    hardware_watchdog
 )
 
 # USB CDC for debug output; UART0 pins are used by the MSX bus.

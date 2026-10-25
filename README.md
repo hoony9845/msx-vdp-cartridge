@@ -3,6 +3,10 @@
 GFX9000 / PowerGraph 호환 카트리지를 실제 V9990 칩 없이 RP2350 하나로 구현하는 프로젝트.
 MSX의 I/O 포트 0x60–0x6F를 받아 V9990처럼 동작하고, 화면은 HDMI(DVI 640×480@60)로 출력한다.
 
+펌웨어 설정으로 **V9968 + geo3d v2.0**(HRA!의 V9968 카트리지 호환)도 고를 수 있다:
+빌드 기본값 `-DMSX_VDP_DEFAULT=V9968|V9990`, 또는 USB 시리얼에 `chip v9968` / `chip v9990`
+(플래시에 저장 후 재부팅). 자세한 내용은 [docs/v9968.md](docs/v9968.md).
+
 - 프로토타입 보드: **Pimoroni Pico Plus 2** (RP2350B, 플래시 16MB, PSRAM 8MB)
   또는 **Waveshare Core2350B1/B2** (`-DPICO_BOARD=waveshare_core2350b`)
 - 결선: [docs/hardware.md](docs/hardware.md)
@@ -11,11 +15,13 @@ MSX의 I/O 포트 0x60–0x6F를 받아 V9990처럼 동작하고, 화면은 HDMI
 ## 구조
 
 ```
-core/        이식 가능한 V9990 코어 (Pico SDK 의존성 없음, PC와 펌웨어가 공유)
+core/        이식 가능한 VDP 코어 (Pico SDK 의존성 없음, PC와 펌웨어가 공유)
   v9990.c        포트, 레지스터, 팔레트, 모드 해석, 타이밍 이벤트
   v9990_cmd.c    커맨드 엔진(블리터)
   v9990_render.c 스캔라인 렌더러 → RGB565
   v9990_vram.h   VRAM 물리 배치 (P1/P2/Bx 뱅크 인터리브)
+  v9968*.c       V9968: 포트/레지스터, 커맨드 엔진(LRMM/LFMx 포함), 렌더러(스프라이트 모드 3)
+  geo3d.c        geo3d v2.0 (참조 모델을 C로 옮김, V9968 커맨드 엔진에 명령 발행)
 host/        PC용 테스트, 렌더 데모, 트레이스 재생기 (gcc)
 tools/compare/  openMSX(GFX9000)와 도트 단위 비교 환경, 게임 기록 도구
 firmware/    RP2350 펌웨어 (pico-sdk)
@@ -23,7 +29,8 @@ firmware/    RP2350 펌웨어 (pico-sdk)
   src/bus.c      core1: 버스 이벤트 처리, 커맨드 엔진 실행, /INT
   src/dvi_out.c  HSTX DVI 출력, V9990 타이밍(VBlank, 라인 인터럽트)
   src/psram.c    PSRAM(VRAM) 초기화
-  src/main.c     클럭(252MHz), core0 렌더 루프
+  src/main.c     클럭(252MHz), 칩 선택, core0 렌더 루프
+  src/vdp_select.c  칩 선택 설정 (플래시 저장, USB 시리얼 명령)
 hardware/    카트리지 PCB (KiCad 프로젝트 생성 스크립트, 거버/BOM/CPL)
 docs/        하드웨어 문서
 ```
@@ -87,6 +94,7 @@ cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
 | 커맨드: LMCM, CMMK, BMxx, LINE, SRCH, POINT, ADVN, P1/P2 좌표계 | ⬜ TODO |
 | 커맨드 실행 시간, HR 비트, 라인 타이밍 정밀도 | ⬜ TODO |
 | 15kHz RGB 출력 (PIO + 저항 DAC) | ⬜ 선택 사항 |
+| **V9968 + geo3d v2.0** (펌웨어 설정으로 선택): 전 화면 모드, 스프라이트 모드 1–3, 전 커맨드, 인터럽트 | ✅ (PC 테스트, RTL·참조 모델·openMSX 포크와 비교) — [docs/v9968.md](docs/v9968.md) |
 
 기준 자료: Yamaha V9990 Application Manual(1992), 매뉴얼에 없는 동작은 openMSX의 구현을 참고했다.
 `tools/compare/`로 openMSX 16.0과 비교한 결과, 테스트 장면 전부가 도트 단위로 일치한다.

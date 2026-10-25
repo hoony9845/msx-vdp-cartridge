@@ -9,6 +9,10 @@ add_library(v9990_core STATIC
     ${CORE_DIR}/v9990.c
     ${CORE_DIR}/v9990_cmd.c
     ${CORE_DIR}/v9990_render.c
+    ${CORE_DIR}/v9968.c
+    ${CORE_DIR}/v9968_cmd.c
+    ${CORE_DIR}/v9968_render.c
+    ${CORE_DIR}/geo3d.c
 )
 target_include_directories(v9990_core PUBLIC ${CORE_DIR})
 target_compile_options(v9990_core PRIVATE -Wall -Wextra -O2)
@@ -20,9 +24,26 @@ target_compile_options(test_v9990 PRIVATE -Wall -Wextra)
 add_executable(render_demo render_demo.c)
 target_link_libraries(render_demo v9990_core)
 
+add_executable(test_v9968 test_v9968.c)
+target_link_libraries(test_v9968 v9990_core)
+target_compile_options(test_v9968 PRIVATE -Wall -Wextra)
+
 enable_testing()
 add_test(NAME test_v9990 COMMAND test_v9990)
+add_test(NAME test_v9968 COMMAND test_v9968)
 
 add_executable(replay replay.c)
 target_link_libraries(replay v9990_core)
 target_compile_options(replay PRIVATE -Wall -Wextra)
+
+add_executable(geo3d_replay geo3d_replay.c)
+target_link_libraries(geo3d_replay v9990_core)
+target_compile_options(geo3d_replay PRIVATE -Wall -Wextra)
+
+add_executable(v9968_cmd_replay v9968_cmd_replay.c)
+target_link_libraries(v9968_cmd_replay v9990_core)
+target_compile_options(v9968_cmd_replay PRIVATE -Wall -Wextra)
+
+add_executable(replay9968 replay9968.c)
+target_link_libraries(replay9968 v9990_core)
+target_compile_options(replay9968 PRIVATE -Wall -Wextra)

@@ -1,10 +1,16 @@
 /*
  * MSX bus side of the emulator (runs on core1).
  *
- *  writes : PIO monitor -> DMA -> ring buffer -> core1 -> v9990_write_port()
+ *  writes : PIO monitor -> DMA -> ring buffer -> core1 -> <chip>_write_port()
  *  reads  : PIO read SM -> DMA (address) -> DMA (lookup) -> PIO drives D0-D7
- *           core1 keeps read_table[] up to date with v9990_peek_port() and
+ *           core1 keeps read_table[] up to date with <chip>_peek_port() and
  *           applies the read side effects afterwards via the monitor events.
+ *
+ * Port map (low nibble of the decoded port):
+ *   V9990 : 0-7 = P#0-P#7, 8-F read FFh
+ *   V9968 : 8-C = V9968 ports 0-4, D/F = geo3d index/data, 0-7 and E read FFh
+ *           (the V9968 cartridge block: 88h-8Fh, or 68h-6Fh with this PCB's
+ *           60h-6Fh decoder)
  *
  * Known limitation: two back-to-back reads of the same port faster than
  * core1 can refresh read_table[] return a stale value. If this shows up
@@ -14,6 +20,7 @@
 #include "pico/stdlib.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
+#include "hardware/timer.h"
 #include "board_pins.h"
 #include "bus.h"
 #include "bus.pio.h"
@@ -25,10 +32,16 @@ static_assert(PIN_D0 == PIN_A0 + 4, "data bus must follow A0-A3");
 #define RING_BITS   12                          /* 4KB = 1024 events */
 #define RING_WORDS  ((1u << RING_BITS) / 4u)
 
+#define V9968_BLOCK 8u                          /* V9968 ports at nibble 8-F */
+#define V9968_CLK_PER_US 86u                    /* command engine: 85.9MHz */
+#define V9968_SLICE 512u                        /* max clocks per loop pass */
+
 static uint32_t ring[RING_WORDS] __attribute__((aligned(1u << RING_BITS)));
 static volatile uint32_t read_table[16] __attribute__((aligned(64)));
 
-static v9990_t *vdp;
+static vdp_chip_t chip;
+static v9990_t *v9990;
+static v9968_t *v9968;
 static PIO bus_pio;
 static uint sm_monitor, sm_read;
 static int dma_ring, dma_read_addr, dma_read_data;
@@ -113,13 +126,20 @@ static void init_read_sm(void) {
                           true);
 }
 
-static void __not_in_flash_func(refresh_read_table)(void) {
+static void __not_in_flash_func(refresh_v9990)(void) {
     for (uint port = 0; port < 8; port++)
-        read_table[port] = v9990_peek_port(vdp, (uint8_t)port);
+        read_table[port] = v9990_peek_port(v9990, (uint8_t)port);
 }
 
-void bus_init(v9990_t *v) {
-    vdp = v;
+static void __not_in_flash_func(refresh_v9968)(void) {
+    for (uint port = 0; port < 8; port++)
+        read_table[V9968_BLOCK + port] = v9968_peek_port(v9968, (uint8_t)port);
+}
+
+void bus_init(vdp_chip_t c, void *vdp) {
+    chip = c;
+    if (chip == VDP_CHIP_V9968) v9968 = vdp;
+    else                        v9990 = vdp;
     bus_pio = pio0;
     sm_monitor = (uint)pio_claim_unused_sm(bus_pio, true);
     sm_read = (uint)pio_claim_unused_sm(bus_pio, true);
@@ -128,7 +148,8 @@ void bus_init(v9990_t *v) {
     dma_read_data = dma_claim_unused_channel(true);
 
     for (uint port = 0; port < 16; port++) read_table[port] = 0xFF;
-    refresh_read_table();
+    if (chip == VDP_CHIP_V9968) refresh_v9968();
+    else                        refresh_v9990();
 
     init_gpio();
     init_monitor_sm();
@@ -136,36 +157,92 @@ void bus_init(v9990_t *v) {
     pio_set_sm_mask_enabled(bus_pio, (1u << sm_monitor) | (1u << sm_read), true);
 }
 
-void __not_in_flash_func(bus_core1_main)(void) {
+static inline uint32_t __not_in_flash_func(ring_head)(void) {
+    return ((dma_hw->ch[dma_ring].write_addr - (uintptr_t)ring) / 4u) & (RING_WORDS - 1u);
+}
+
+static void __not_in_flash_func(loop_v9990)(void) {
     uint32_t tail = 0;
     bool in_reset = false;
 
     for (;;) {
-        uint32_t head = ((dma_hw->ch[dma_ring].write_addr - (uintptr_t)ring) / 4u)
-                        & (RING_WORDS - 1u);
+        uint32_t head = ring_head();
         while (tail != head) {
             uint32_t ev = ring[tail];
             tail = (tail + 1u) & (RING_WORDS - 1u);
             uint8_t port = (ev >> 1) & 0x0F;
-            if (ev & 1u)
-                (void)v9990_read_port(vdp, port);
-            else
-                v9990_write_port(vdp, port, (uint8_t)(ev >> 5));
-            refresh_read_table();
+            if (port < 8) {
+                if (ev & 1u)
+                    (void)v9990_read_port(v9990, port);
+                else
+                    v9990_write_port(v9990, port, (uint8_t)(ev >> 5));
+                refresh_v9990();
+            }
         }
 
-        if (v9990_cmd_step(vdp, 16))
-            refresh_read_table();
-        read_table[V9990_PORT_STATUS] = v9990_peek_port(vdp, V9990_PORT_STATUS);
-        read_table[V9990_PORT_INT_FLAG] = v9990_peek_port(vdp, V9990_PORT_INT_FLAG);
+        if (v9990_cmd_step(v9990, 16))
+            refresh_v9990();
+        read_table[V9990_PORT_STATUS] = v9990_peek_port(v9990, V9990_PORT_STATUS);
+        read_table[V9990_PORT_INT_FLAG] = v9990_peek_port(v9990, V9990_PORT_INT_FLAG);
 
-        gpio_put(PIN_INT, !v9990_irq_pending(vdp));
+        gpio_put(PIN_INT, !v9990_irq_pending(v9990));
 
         bool reset = !gpio_get(PIN_RESET);
         if (reset && !in_reset) {
-            v9990_reset(vdp);
-            refresh_read_table();
+            v9990_reset(v9990);
+            refresh_v9990();
         }
         in_reset = reset;
     }
+}
+
+static void __not_in_flash_func(loop_v9968)(void) {
+    uint32_t tail = 0;
+    bool in_reset = false;
+    uint32_t last_us = timer_hw->timerawl;
+    int32_t credit = 0;                 /* command engine clocks owed */
+
+    for (;;) {
+        uint32_t head = ring_head();
+        while (tail != head) {
+            uint32_t ev = ring[tail];
+            tail = (tail + 1u) & (RING_WORDS - 1u);
+            uint8_t port = (ev >> 1) & 0x0F;
+            if (port >= V9968_BLOCK) {
+                if (ev & 1u)
+                    (void)v9968_read_port(v9968, port - V9968_BLOCK);
+                else
+                    v9968_write_port(v9968, port - V9968_BLOCK, (uint8_t)(ev >> 5));
+                refresh_v9968();
+            }
+        }
+
+        /* the command engine runs at the cartridge's speed, not faster */
+        uint32_t now = timer_hw->timerawl;
+        credit += (int32_t)((now - last_us) * V9968_CLK_PER_US);
+        last_us = now;
+        if (credit > (int32_t)V9968_SLICE) credit = V9968_SLICE;
+        if (credit > 0 && (v9968_cmd_busy(v9968) || v9968->geo.running)) {
+            credit -= (int32_t)v9968_service(v9968, (unsigned)credit);
+            refresh_v9968();
+        } else {
+            read_table[V9968_BLOCK + V9968_PORT_CTRL] = v9968_peek_port(v9968, V9968_PORT_CTRL);
+            read_table[V9968_BLOCK + V9968_PORT_INT] = v9968_peek_port(v9968, V9968_PORT_INT);
+        }
+        if (!v9968_cmd_busy(v9968) && !v9968->geo.running && credit > 0) credit = 0;
+
+        gpio_put(PIN_INT, !v9968_irq_pending(v9968));
+
+        bool reset = !gpio_get(PIN_RESET);
+        if (reset && !in_reset) {
+            v9968_reset(v9968);
+            refresh_v9968();
+        }
+        in_reset = reset;
+    }
+}
+
+void __not_in_flash_func(bus_core1_main)(void) {
+    if (chip == VDP_CHIP_V9968) loop_v9968();
+    else                        loop_v9990();
 }
