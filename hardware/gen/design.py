@@ -94,6 +94,9 @@ SYMBOLS = {
          ("32", "GP27", B), ("31", "GP26", B), ("30", "RUN", I), ("29", "GP22", B),
          ("28", "GND", PI), ("27", "GP21", B), ("26", "GP20", B), ("25", "GP19", B),
          ("24", "GP18", B), ("23", "GND", PI), ("22", "GP17", B), ("21", "GP16", B)]),
+    "SW_DPDT": ("Slide switch, DPDT (pins 2/5 common; 1/6 on one side, 3/4 on the other)",
+        [("1", "A1", P), ("2", "A", P), ("3", "A2", P)],
+        [("6", "B1", P), ("5", "B", P), ("4", "B2", P)]),
     "MSX_Cartridge": ("MSX cartridge edge connector (50 pins, 2.54mm)",
         [(str(n), MSX_SLOT[n], P) for n in range(1, 50, 2)],
         [(str(n), MSX_SLOT[n], P) for n in range(2, 51, 2)]),
@@ -127,12 +130,15 @@ def comp(ref, symbol, value, footprint, mpn, pins, description=""):
 comp("J1", f"{LIB}:MSX_Cartridge", "MSX_Cartridge", f"{LIB}:MSX_Cartridge_Edge", "",
      {str(n): SLOT_NETS[sig] for n, sig in MSX_SLOT.items() if sig in SLOT_NETS})
 
-# U3: port decoder. /CS = 0 when A7-A4 = 0110, /IORQ = 0, /M1 = 1
+# U3: port decoder. /CS = 0 when /IORQ = 0, /M1 = 1 and A7-A4 equal the
+# value set by SW1: 0110 (60h-6Fh, V9990) or 1000 (88h-8Fh, V9968 block).
+# Q0 (A7) = VDP_SEL, Q1/Q2 (A6/A5) = VDP_SEL_N, Q3 (A4) = 0. The 3.3V
+# levels from SW1 are valid HCT input highs (VIH 2.0V).
 comp("U3", f"{LIB}:74HCT688", "74HCT688", FP_SOIC20W, "74HCT688D", {
     "1": "GND",
-    "2": "MSX_A7", "3": "GND",
-    "4": "MSX_A6", "5": "+5V",
-    "6": "MSX_A5", "7": "+5V",
+    "2": "MSX_A7", "3": "VDP_SEL",
+    "4": "MSX_A6", "5": "VDP_SEL_N",
+    "6": "MSX_A5", "7": "VDP_SEL_N",
     "8": "MSX_A4", "9": "GND",
     "11": "IORQ_N", "12": "GND",
     "13": "M1_N", "14": "+5V",
@@ -146,13 +152,14 @@ comp("U1", f"{LIB}:74LVC245", "74LVC245", FP_SOIC20W, "SN74LVC245ADWR", {
     **{str(18 - i): f"GP_D{i}" for i in range(8)},
     "10": "GND", "20": "+3V3"})
 
-# U2: address / control input buffer, always A->B
+# U2: address / control input buffer, always A->B. Channel 6 still buffers
+# /WR but its output is left open: GP22 reads SW1 since rev 0.2.
 u2_in = ["MSX_A0", "MSX_A1", "MSX_A2", "MSX_A3", "RD_N", "WR_N", "RESET_N", "CS_N"]
-u2_out = ["GP_A0", "GP_A1", "GP_A2", "GP_A3", "GP_RD_N", "GP_WR_N", "GP_RESET_N", "GP_CS_N"]
+u2_out = ["GP_A0", "GP_A1", "GP_A2", "GP_A3", "GP_RD_N", None, "GP_RESET_N", "GP_CS_N"]
 comp("U2", f"{LIB}:74LVC245", "74LVC245", FP_SOIC20W, "SN74LVC245ADWR", {
     "1": "+3V3", "19": "GND",
     **{str(2 + i): n for i, n in enumerate(u2_in)},
-    **{str(18 - i): n for i, n in enumerate(u2_out)},
+    **{str(18 - i): n for i, n in enumerate(u2_out) if n},
     "10": "GND", "20": "+3V3"})
 
 # U5: /BUSDIR request = /CS OR /RD (low while the MSX reads our ports)
@@ -176,7 +183,7 @@ GPIO_NETS = {
     8: "GP_D4", 9: "GP_D5", 10: "GP_D6", 11: "GP_D7",
     12: "DVI_D0_P", 13: "DVI_D0_N", 14: "DVI_CK_P", 15: "DVI_CK_N",
     16: "DVI_D2_P", 17: "DVI_D2_N", 18: "DVI_D1_P", 19: "DVI_D1_N",
-    20: "GP_CS_N", 21: "GP_RD_N", 22: "GP_WR_N",
+    20: "GP_CS_N", 21: "GP_RD_N", 22: "VDP_SEL",
     26: "GP_RESET_N", 27: "GP_INT", 28: "GP_WAIT",
 }
 
@@ -243,7 +250,7 @@ pico = {
     "11": "GP_D4", "12": "GP_D5", "14": "GP_D6", "15": "GP_D7",
     "16": "DVI_D0_P", "17": "DVI_D0_N", "19": "DVI_CK_P", "20": "DVI_CK_N",
     "21": "DVI_D2_P", "22": "DVI_D2_N", "24": "DVI_D1_P", "25": "DVI_D1_N",
-    "26": "GP_CS_N", "27": "GP_RD_N", "29": "GP_WR_N",
+    "26": "GP_CS_N", "27": "GP_RD_N", "29": "VDP_SEL",
     "31": "GP_RESET_N", "32": "GP_INT", "34": "GP_WAIT",
     "36": "+3V3", "39": "VSYS",
 }
@@ -274,6 +281,18 @@ comp("J2", f"{LIB}:HDMI_A", "HDMI_A",
 
 # /CS pull-up so U1 stays disabled while the MSX is off and USB powers the Pico
 comp("R9", "Device:R", "10k", FP_R, "0805W8F1002T5E", {"1": "+3V3", "2": "CS_N"})
+
+# SW1: emulated VDP. Both poles move together; pins 1/6 are on the same side.
+#   pins 2-1 / 5-6 (toward the board corner): V9990, ports 60h-6Fh
+#   pins 2-3 / 5-4:                           V9968 + geo3d, ports 88h-8Fh
+# VDP_SEL (= GP22, high = V9968) drives U3 Q0, VDP_SEL_N drives Q1 and Q2.
+# R10/R11 hold both while the slider moves (break before make).
+comp("SW1", f"{LIB}:SW_DPDT", "V9990/V9968",
+     "Button_Switch_THT:SW_CK_JS202011AQN_DPDT_Angled", "JS202011AQN", {
+         "2": "VDP_SEL", "1": "GND", "3": "+3V3",
+         "5": "VDP_SEL_N", "6": "+3V3", "4": "GND"})
+comp("R10", "Device:R", "10k", FP_R, "0805W8F1002T5E", {"1": "VDP_SEL", "2": "GND"})
+comp("R11", "Device:R", "10k", FP_R, "0805W8F1002T5E", {"1": "+3V3", "2": "VDP_SEL_N"})
 
 # Decoupling
 for i, (ref, net) in enumerate([("U1", "+3V3"), ("U2", "+3V3"), ("U3", "+5V"),

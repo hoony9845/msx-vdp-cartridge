@@ -9,8 +9,8 @@
  * Port map (low nibble of the decoded port):
  *   V9990 : 0-7 = P#0-P#7, 8-F read FFh
  *   V9968 : 8-C = V9968 ports 0-4, D/F = geo3d index/data, 0-7 and E read FFh
- *           (the V9968 cartridge block: 88h-8Fh, or 68h-6Fh with this PCB's
- *           60h-6Fh decoder)
+ *           (the V9968 cartridge block: 88h-8Fh with SW1 at V9968, or
+ *           68h-6Fh on a rev 0.1 PCB whose decoder is fixed at 6xh)
  *
  * Known limitation: two back-to-back reads of the same port faster than
  * core1 can refresh read_table[] return a stale value. If this shows up
@@ -56,7 +56,6 @@ static void init_gpio(void) {
 
     gpio_init(PIN_CS);    gpio_set_dir(PIN_CS, GPIO_IN);    gpio_pull_up(PIN_CS);
     gpio_init(PIN_RD);    gpio_set_dir(PIN_RD, GPIO_IN);    gpio_pull_up(PIN_RD);
-    gpio_init(PIN_WR);    gpio_set_dir(PIN_WR, GPIO_IN);    gpio_pull_up(PIN_WR);
     gpio_init(PIN_RESET); gpio_set_dir(PIN_RESET, GPIO_IN); gpio_pull_up(PIN_RESET);
 
     /* 74LVC07 open-drain buffers: GPIO high = released */

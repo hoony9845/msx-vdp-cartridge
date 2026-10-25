@@ -157,6 +157,12 @@ PLACE = {
     "C6": (31.4, 22.4, 0),           # +5V bulk
     "C7": (37.2, 22.4, 0),           # +3V3 bulk, near Pico pin 36
     "R9": (100.5, 57.5, 90),
+    "R10": (102.7, 57.5, 90),        # SW1 hold resistors, next to U3
+    "R11": (104.9, 57.5, 90),
+    # VDP select switch at the top edge, right of the HDMI connector; rotated
+    # so the lever sticks ~1.2mm out of the top edge (origin = pin 1; the far
+    # pad row keeps 0.5mm from the edge)
+    "SW1": (116.5, 24.5, 180),
 }
 # DVI series resistors in HDMI pad order (D2+ D2- D1+ D1- D0+ D0- CK+ CK-)
 for i, ref in enumerate(["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"]):
@@ -326,10 +332,20 @@ def main():
             t.SetVisible(False)                 # the "HDMI" label sits there
         if ref == "D1" and design.VARIANT == "picoplus2":
             t.SetPosition(V(PLACE["D1"][0] - 3.6, PLACE["D1"][1]))   # keep off the board edge
+        if ref in ("R9", "R10", "R11"):
+            x, y, _ = PLACE[ref]
+            t.SetPosition(V(x, y - 2.5))
+            t.SetTextAngleDegrees(90)
         if ref in ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"):
             x, y, _ = PLACE[ref]
             t.SetPosition(V(x, y + 2.7))
             t.SetTextAngleDegrees(90)
+
+    # SW1 sits at the board edge where a thermal relief only gets one spoke:
+    # connect its GND pads solidly (they also tie the two GND pours together)
+    for pad in fps["SW1"].Pads():
+        if pad.GetNetname() == "GND":
+            pad.SetZoneConnection(pcbnew.ZONE_CONNECTION_FULL)
 
     # outline + holes
     for a, b in zip(OUTLINE, OUTLINE[1:] + OUTLINE[:1]):
@@ -430,10 +446,13 @@ def main():
     add_rule_area(board, TONGUE, [pcbnew.F_Cu, pcbnew.B_Cu], name="gold_fingers")
 
     # silkscreen
-    add_text(board, "MSX V9990", 106.0, 23.0, 1.5, bold=True)
-    add_text(board, "CARTRIDGE (RP2350)", 106.0, 25.6, 1.0)
-    add_text(board, "rev 0.1", 106.0, 27.8, 0.9)
-    add_text(board, "hoony9845@gmail.com", 106.0, 29.8, 0.9)
+    sx = PLACE["SW1"][0]
+    add_text(board, "V9968", sx - 7.5, 27.0, 0.8)        # slider away from the corner
+    add_text(board, "V9990", sx + 0.2, 27.0, 0.8)        # slider toward the corner
+    add_text(board, "MSX V9990/V9968", 106.0, 29.6, 1.3, bold=True)
+    add_text(board, "CARTRIDGE (RP2350)", 106.0, 31.9, 1.0)
+    add_text(board, "rev 0.2", 106.0, 34.0, 0.9)
+    add_text(board, "hoony9845@gmail.com", 106.0, 36.0, 0.9)
     hx = PLACE["J2"][0]
     add_text(board, "HDMI", hx, 31.0, 1.0)
     if design.VARIANT == "picoplus2":

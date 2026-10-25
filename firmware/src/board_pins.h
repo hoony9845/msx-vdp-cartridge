@@ -16,7 +16,8 @@
 #define PIN_D0        4   /* D0-D7  : GPIO 4-11 */
 #define PIN_CS       20   /* /CS : /IORQ=0, /M1=1, A7-A4=0110 (74HCT688) */
 #define PIN_RD       21   /* /RD */
-#define PIN_WR       22   /* /WR (not used by the PIO yet, reserved) */
+#define PIN_VDP_SEL  22   /* SW1 (PCB rev 0.2): high = V9968, low = V9990.
+                             On rev 0.1 boards this pin carries /WR. */
 #define PIN_RESET    26   /* /RESET from the slot (input) */
 #define PIN_INT      27   /* -> 74LVC07 -> /INT  (low = assert) */
 #define PIN_WAIT     28   /* -> 74LVC07 -> /WAIT (low = assert) */

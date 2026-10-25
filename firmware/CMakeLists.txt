@@ -49,6 +49,15 @@ elseif(NOT MSX_VDP_DEFAULT STREQUAL "V9990")
     message(FATAL_ERROR "MSX_VDP_DEFAULT must be V9990 or V9968")
 endif()
 
+# PCB rev 0.2: the VDP comes from switch SW1 (GP22). Rev 0.1 (no switch,
+# GP22 = /WR): -DMSX_VDP_SWITCH=OFF selects with MSX_VDP_DEFAULT / USB serial.
+option(MSX_VDP_SWITCH "Select the VDP with the cartridge switch (PCB rev 0.2)" ON)
+if(MSX_VDP_SWITCH)
+    target_compile_definitions(msx_v9990 PRIVATE MSX_VDP_SWITCH=1)
+else()
+    target_compile_definitions(msx_v9990 PRIVATE MSX_VDP_SWITCH=0)
+endif()
+
 target_link_libraries(msx_v9990
     pico_stdlib
     pico_multicore

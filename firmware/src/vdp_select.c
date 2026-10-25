@@ -10,8 +10,10 @@
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/flash.h"
+#include "hardware/gpio.h"
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
+#include "board_pins.h"
 #include "vdp_select.h"
 
 #define SETTING_OFFSET  (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
@@ -20,6 +22,9 @@
 
 #ifndef MSX_VDP_DEFAULT_V9968
 #define MSX_VDP_DEFAULT_V9968 0
+#endif
+#ifndef MSX_VDP_SWITCH
+#define MSX_VDP_SWITCH 1
 #endif
 
 typedef struct {
@@ -51,7 +56,20 @@ static void write_setting(vdp_chip_t chip) {
     restore_interrupts(irq);
 }
 
+/* SW1 is driven to 3.3V or GND (R10/R11 hold it while it moves). */
+static vdp_chip_t read_switch(void) {
+    gpio_init(PIN_VDP_SEL);
+    gpio_set_dir(PIN_VDP_SEL, GPIO_IN);
+    gpio_disable_pulls(PIN_VDP_SEL);
+    sleep_us(100);
+    return gpio_get(PIN_VDP_SEL) ? VDP_CHIP_V9968 : VDP_CHIP_V9990;
+}
+
 vdp_chip_t vdp_select_boot(void) {
+    if (MSX_VDP_SWITCH) {
+        watchdog_hw->scratch[0] = 0;
+        return read_switch();
+    }
     if (watchdog_hw->scratch[0] == PENDING_MAGIC) {
         vdp_chip_t want = (vdp_chip_t)(watchdog_hw->scratch[1] & 1);
         watchdog_hw->scratch[0] = 0;
@@ -84,6 +102,11 @@ static void command(const char *line, vdp_chip_t current) {
     }
     line += 4;
     while (*line == ' ') line++;
+    if (MSX_VDP_SWITCH && *line) {
+        printf("the chip is set by the switch on the cartridge (SW1); "
+               "change it with the power off\n");
+        line = "";
+    }
     if (strcmp(line, "v9990") == 0 || strcmp(line, "V9990") == 0) {
         if (current != VDP_CHIP_V9990) switch_to(VDP_CHIP_V9990);
     } else if (strcmp(line, "v9968") == 0 || strcmp(line, "V9968") == 0) {

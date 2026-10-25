@@ -3,9 +3,9 @@
 GFX9000 / PowerGraph 호환 카트리지를 실제 V9990 칩 없이 RP2350 하나로 구현하는 프로젝트.
 MSX의 I/O 포트 0x60–0x6F를 받아 V9990처럼 동작하고, 화면은 HDMI(DVI 640×480@60)로 출력한다.
 
-펌웨어 설정으로 **V9968 + geo3d v2.0**(HRA!의 V9968 카트리지 호환)도 고를 수 있다:
-빌드 기본값 `-DMSX_VDP_DEFAULT=V9968|V9990`, 또는 USB 시리얼에 `chip v9968` / `chip v9990`
-(플래시에 저장 후 재부팅). 자세한 내용은 [docs/v9968.md](docs/v9968.md).
+카트리지의 슬라이드 스위치(SW1, PCB rev 0.2)로 **V9968 + geo3d v2.0**(HRA!의 V9968 카트리지 호환, 포트 88h–8Fh)도 고를 수 있다.
+스위치가 포트 디코더와 펌웨어 선택을 함께 바꾼다. 스위치 없는 rev 0.1 기판은 펌웨어 설정(`-DMSX_VDP_SWITCH=OFF`, USB 시리얼 `chip v9968`)으로 고른다.
+자세한 내용은 [docs/v9968.md](docs/v9968.md)
 
 - 프로토타입 보드: **Pimoroni Pico Plus 2** (RP2350B, 플래시 16MB, PSRAM 8MB)
   또는 **Waveshare Core2350B1/B2** (`-DPICO_BOARD=waveshare_core2350b`)

@@ -19,6 +19,11 @@ RP2350 모듈을 얹는 MSX 카트리지 기판. 회로 설명은 [../docs/hardw
   **주문 전에 구멍 확인용 PDF(`fab_core2350b/*_hole_check*.pdf`) 위에 모듈 실물을 올려 확인할 것.**
 - 패드 번호: 1–16 = P1, 17–32 = P2, 33–48 = P3, 49–64 = P4.
 
+- **rev 0.2**: VDP 선택 슬라이드 스위치 SW1(C&K JS202011AQN, DPDT 직각형)을 기판 위쪽 오른쪽 모서리에 추가했다(레버가 위쪽 가장자리 밖으로 약 1.2mm 나옴).
+  - SW1이 디코더 비교값(V9990: 60h–6Fh, V9968: 88h–8Fh)과 GP22를 바꾼다.
+  - 보조 부품으로 R10/R11(10k)을 추가했다.
+  - GP22는 /WR 대신 SW1을 읽는다. U2는 /WR을 받지만 출력은 비워 둔다.
+  - SW1은 스루홀 부품이라 손으로 납땜한다. 카트리지 케이스를 쓰면 레버 자리를 파 줘야 한다.
 - 2층, 1.6mm, 99.8 × 64.0 mm (엣지 탭 65.45 × 11 mm)
 - 외곽선과 엣지 커넥터 치수는 실제 슬롯에 맞는 것으로 검증된 costarc의 MSX-Protoboard 카트리지 외형을 따름
 - 홀수 핀은 뒷면(B.Cu), 짝수 핀은 앞면(F.Cu)에 있고, 앞면에서 볼 때 1·2번 핀이 오른쪽 끝
@@ -55,7 +60,7 @@ cd hardware && ./build.sh      # 2~5분 (자동 배선 포함)
 |---|---|
 | ERC | 0 errors, 0 warnings |
 | DRC (회로도 일치 검사 포함) | 0 violations, 미연결 0, 풋프린트 오류 0 |
-| 넷리스트 대조 | design.py와 회로도 넷 101개 일치 |
+| 넷리스트 대조 | design.py와 회로도 넷 일치 (DRC schematic parity) |
 
 ## JLCPCB 주문
 
@@ -74,7 +79,7 @@ cd hardware && ./build.sh      # 2~5분 (자동 배선 포함)
 SMT 조립까지 맡길 경우:
 - `fab/msx_v9990_cart_bom_jlcpcb.csv`, `fab/msx_v9990_cart_cpl_jlcpcb.csv` 업로드
 - BOM의 `LCSC Part #` 칸은 비워 두었다. JLC 부품 검색에서 MPN으로 찾아 채울 것
-- M1(Pico Plus 2)은 손으로 핀헤더 장착
+- M1(Pico Plus 2)은 손으로 핀헤더 장착, SW1(스루홀 슬라이드 스위치)도 손납땜
 - J2(HDMI)는 스루홀 실드 핀이 있어 CPL에서 빠져 있다. 손납땜하거나 JLC 부품이 있으면 추가할 것
 - JLC 미리보기에서 SOIC 부품의 회전 방향(1번 핀 위치)을 반드시 확인할 것
 

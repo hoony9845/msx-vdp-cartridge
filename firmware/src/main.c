@@ -123,7 +123,11 @@ int main(void) {
 
     printf("MSX VDP emulator: %s, clk_sys %lu Hz\n", vdp_chip_name(chip),
            (unsigned long)clock_get_hz(clk_sys));
+#if MSX_VDP_SWITCH
+    printf("chosen by the cartridge switch SW1 (change it with the power off)\n");
+#else
     printf("type 'chip v9990' or 'chip v9968' to switch\n");
+#endif
 
     if (chip == VDP_CHIP_V9968) {
         v9968_init(&v9968, v9968_vram);

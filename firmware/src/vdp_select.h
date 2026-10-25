@@ -1,13 +1,16 @@
 /*
  * Which VDP the cartridge emulates: V9990 (GFX9000, ports 60h-67h) or
- * V9968 + geo3d (the V9968 cartridge block, offsets 8-Fh of the decoded
- * port range: 68h-6Fh with the 60h-6Fh decoder of this PCB, 88h-8Fh with
- * the decoder set to 8xh).
+ * V9968 + geo3d (the V9968 cartridge block at offsets 8-Fh of the decoded
+ * port range: 88h-8Fh when SW1 sets the decoder to 8xh, 68h-6Fh on a rev 0.1
+ * board whose decoder is fixed at 6xh).
  *
- * The choice is a firmware setting: the build default (CMake option
- * MSX_VDP_DEFAULT) unless one was saved in the last flash sector. It is
- * changed over USB serial ("chip v9990" / "chip v9968"), which saves it
- * and reboots.
+ * PCB rev 0.2 has a slide switch (SW1) that sets both the port decoder
+ * (60h-6Fh or 88h-8Fh) and GP22; the firmware follows it (CMake option
+ * MSX_VDP_SWITCH, on by default). Rev 0.1 boards have no switch: build with
+ * -DMSX_VDP_SWITCH=OFF and the choice is a firmware setting instead, the
+ * build default (MSX_VDP_DEFAULT) unless one was saved in the last flash
+ * sector, changed over USB serial ("chip v9990" / "chip v9968"), which
+ * saves it and reboots.
  */
 #ifndef VDP_SELECT_H
 #define VDP_SELECT_H
