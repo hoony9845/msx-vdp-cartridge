@@ -143,7 +143,7 @@ text("(0,0)", ox - 1.0, oy - 2.0, 1.2)
 
 # ---- hole table -----------------------------------------------------------
 tx, ty = ox, oy + bh + 30          # below the rulers, well inside the printable area
-text("MSX V9990/V9968 cartridge rev 0.2 - hole check (1:1, front / component side view)", tx, ty, 1.8)
+text("MSX V9990/V9968 cartridge rev 0.3 - hole check (1:1, front / component side view)", tx, ty, 1.8)
 ty += 4
 text(f"Board {bw:.2f} x {bh:.2f} mm, origin = top-left corner, X right, Y down", tx, ty, 1.4)
 ty += 6

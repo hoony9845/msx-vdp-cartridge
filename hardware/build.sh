@@ -8,6 +8,8 @@ cd "$(dirname "$0")"
 export MSX_VARIANT=${MSX_VARIANT:-picoplus2}
 if [ "$MSX_VARIANT" = core2350b ]; then
     P=msx_v9990_cart_core2350b; FAB=fab_core2350b; REP=reports_core2350b
+    # first Freerouting strategy that leaves no GND pour island on this layout
+    FR_ARGS=${FR_ARGS:--us hybrid -hr 3:1}
 else
     P=msx_v9990_cart; FAB=fab; REP=reports
 fi

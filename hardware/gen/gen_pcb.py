@@ -28,8 +28,10 @@ def V(x, y):
 
 
 # ---------------------------------------------------------------------------
-# Board geometry (mm). Outline follows the cartridge PCB of costarc's
-# MSX-Protoboard ("MSX_CART_SW_Official"), which is known to fit real slots.
+# Board geometry (mm). Fingers follow the cartridge PCB of costarc's
+# MSX-Protoboard ("MSX_CART_SW_Official"), which is known to fit real slots;
+# outline and shell-post holes follow MSXLegend's KC MSX FLASH V3 (made for
+# the Overrich Konami-style cartridge case), aligned on the finger edge.
 # ---------------------------------------------------------------------------
 EDGE_PIN1_X = 105.682        # x of pins 1/2; pins 49/50 at 105.682 - 24 * 2.54
 FINGER_Y = 78.808            # finger centre line
@@ -45,15 +47,19 @@ def _corner(cx, cy, a0, a1, r=1.0, n=6):
              round(cy + r * math.sin(math.radians(a0 + (a1 - a0) * i / n)), 4)) for i in range(n + 1)]
 
 
+BOARD_TOP = 18.038
+BOARD_LEFT, BOARD_RIGHT = 19.602, 120.692
+TONGUE_TOP = 70.918
+TONGUE_LEFT, TONGUE_RIGHT = 42.812, 107.597
 OUTLINE = (
-    [(20.0, 20.0), (119.8, 20.0), (119.8, 72.989), (107.93, 72.989)]
-    + _corner(106.93, BOARD_BOTTOM - 1.0, 0, 90)          # tongue bottom-right, R1
-    + _corner(43.48, BOARD_BOTTOM - 1.0, 90, 180)         # tongue bottom-left, R1
-    + [(42.48, 72.989), (30.24, 72.989), (30.24, 62.0), (20.0, 62.0)]
+    [(BOARD_LEFT, BOARD_TOP), (BOARD_RIGHT, BOARD_TOP), (BOARD_RIGHT, TONGUE_TOP), (TONGUE_RIGHT, TONGUE_TOP)]
+    + _corner(TONGUE_RIGHT - 1.0, BOARD_BOTTOM - 1.0, 0, 90)     # tongue bottom-right, R1
+    + _corner(TONGUE_LEFT + 1.0, BOARD_BOTTOM - 1.0, 90, 180)    # tongue bottom-left, R1
+    + [(TONGUE_LEFT, TONGUE_TOP), (30.112, TONGUE_TOP), (30.112, 59.567), (BOARD_LEFT, 59.567)]
 )
-HOLES = [(46.74, 62.0, 2.5),     # H2 (cartridge-shell post)
-         (103.24, 67.0, 2.5)]    # H1
-TONGUE = [(42.48, 72.989), (107.93, 72.989), (107.93, BOARD_BOTTOM), (42.48, BOARD_BOTTOM)]
+HOLES = [(46.862, 61.318, 2.18),     # H2 (cartridge-shell post, 4.36mm cutout)
+         (103.062, 66.718, 2.18)]    # H1
+TONGUE = [(TONGUE_LEFT, TONGUE_TOP), (TONGUE_RIGHT, TONGUE_TOP), (TONGUE_RIGHT, BOARD_BOTTOM), (TONGUE_LEFT, BOARD_BOTTOM)]
 
 
 def write_core2350b_footprint():
@@ -146,10 +152,10 @@ def write_edge_footprint():
 PLACE = {
     "J1": (EDGE_PIN1_X - 12 * 2.54, FINGER_Y, 0),
     "M1": (21.87, 44.89, 90),        # origin = pin 1; module centre (46, 36), USB-C at the left edge
-    "J2": (84.0, 23.5, 180),         # HDMI opening at the top edge
-    "U1": (60.0, 64.0, 90),          # data transceiver above D0-D7 fingers
-    "U2": (76.0, 64.0, 90),          # addr/ctrl buffer
-    "U3": (92.0, 64.0, 90),          # port decoder
+    "J2": (84.0, BOARD_TOP + 3.5, 180),     # HDMI opening at the top edge
+    "U1": (60.0, 62.0, 90),          # data transceiver above D0-D7 fingers
+    "U2": (76.0, 62.0, 90),          # addr/ctrl buffer
+    "U3": (92.0, 62.0, 90),          # port decoder
     "U4": (111.5, 59.0, 90),         # open-drain drivers
     "U5": (111.5, 47.5, 90),         # BUSDIR OR gate
     # power parts in the strip between the board top edge and the Pico
@@ -162,7 +168,7 @@ PLACE = {
     # VDP select switch at the top edge, right of the HDMI connector; rotated
     # so the lever sticks ~1.2mm out of the top edge (origin = pin 1; the far
     # pad row keeps 0.5mm from the edge)
-    "SW1": (116.5, 24.5, 180),
+    "SW1": (108.5, BOARD_TOP + 4.5, 180),
 }
 # DVI series resistors in HDMI pad order (D2+ D2- D1+ D1- D0+ D0- CK+ CK-)
 for i, ref in enumerate(["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"]):
@@ -173,7 +179,7 @@ if design.VARIANT == "core2350b":
     # leaving a channel between the module and the HDMI resistors.
     PLACE.update({
         "M1": (50.0, 36.0, 90),          # footprint origin = module centre, bus pins above U1/U2
-        "J2": (80.0, 23.5, 180),
+        "J2": (80.0, BOARD_TOP + 3.5, 180),
         "D1": (31.0, 40.0, 0),           # MSX +5V -> module VBUS (left of the module)
         "C6": (31.0, 36.5, 0),           # +5V bulk
         "C7": (35.0, 43.62, 180),        # +3V3 bulk, fed by a fixed track from the 3V3 pin
@@ -364,7 +370,7 @@ def main():
     # Temporary keepouts (removed by finish_pcb.py) reserving room for the GND
     # copper added after autorouting: the HDMI ground bar under the connector
     # body and the GND finger stubs (pins 41/43, B.Cu) up to the pour.
-    add_rule_area(board, [(75.0, 20.0), (93.0, 20.0), (93.0, 27.45), (75.0, 27.45)],
+    add_rule_area(board, [(75.0, BOARD_TOP), (93.0, BOARD_TOP), (93.0, BOARD_TOP + 7.45), (75.0, BOARD_TOP + 7.45)],
                   [pcbnew.F_Cu], no_tracks=True, no_pour=False, name="tmp_hdmi_gnd")
     for pin in (41, 43):
         x = EDGE_PIN1_X - ((pin - 1) // 2) * 2.54
@@ -403,6 +409,17 @@ def main():
     for i, (a, b) in enumerate(zip(path, path[1:])):
         # narrow where it leaves the 0.5mm-pitch pad row
         pcb_helpers.add_track(board, a, b, p18.GetNet(), 0.25 if i == 0 else 0.4)
+
+    if design.VARIANT == "picoplus2":
+        # MSX +5V reaches D1/C6 only between two Pico pins (0.84mm gap, which
+        # Freerouting's inflated clearance often misses): fix that stretch.
+        c6 = next(p for p in fps["C6"].Pads() if p.GetNetname() == "+5V")
+        cx, cy = pcbnew.ToMM(c6.GetPosition().x), pcbnew.ToMM(c6.GetPosition().y)
+        gx = PLACE["M1"][0] + 3.5 * 2.54        # midway between pin columns 4 and 5
+        pcb_helpers.add_track(board, (cx, cy), (gx, cy + 0.31), c6.GetNet(), 0.4)
+        pcb_helpers.add_track(board, (gx, cy + 0.31), (gx, cy + 1.31), c6.GetNet(), 0.4)
+        pcb_helpers.add_via(board, (gx, cy + 1.31), c6.GetNet())
+        pcb_helpers.add_track(board, (gx, cy + 1.31), (gx, 50.5), c6.GetNet(), 0.4, layer=pcbnew.B_Cu)
 
     if design.VARIANT == "core2350b":
         # The module's 3V3 pin is on the inner ring; power-width tracks cannot
@@ -447,11 +464,11 @@ def main():
 
     # silkscreen
     sx = PLACE["SW1"][0]
-    add_text(board, "V9968", sx - 7.5, 27.0, 0.8)        # slider away from the corner
-    add_text(board, "V9990", sx + 0.2, 27.0, 0.8)        # slider toward the corner
+    add_text(board, "V9968", sx - 7.5, PLACE["SW1"][1] + 2.5, 0.8)        # slider to the left
+    add_text(board, "V9990", sx + 0.2, PLACE["SW1"][1] + 2.5, 0.8)        # slider to the right
     add_text(board, "MSX V9990/V9968", 106.0, 29.6, 1.3, bold=True)
     add_text(board, "CARTRIDGE (RP2350)", 106.0, 31.9, 1.0)
-    add_text(board, "rev 0.2", 106.0, 34.0, 0.9)
+    add_text(board, "rev 0.3", 106.0, 34.0, 0.9)
     add_text(board, "hoony9845@gmail.com", 106.0, 36.0, 0.9)
     hx = PLACE["J2"][0]
     add_text(board, "HDMI", hx, 31.0, 1.0)

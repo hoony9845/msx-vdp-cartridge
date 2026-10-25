@@ -298,7 +298,7 @@ sch = [
     "(kicad_sch (version 20231120) (generator \"eeschema\") (generator_version \"8.0\")",
     f"  (uuid {q(root_uuid)})",
     "  (paper \"A3\")",
-    f"  (title_block (title \"MSX V9990 / V9968 Cartridge (RP2350, {MODULE_NAME})\") (rev \"0.2\") "
+    f"  (title_block (title \"MSX V9990 / V9968 Cartridge (RP2350, {MODULE_NAME})\") (rev \"0.3\") "
     "(comment 1 \"Generated from hardware/gen/design.py\"))",
     "  (lib_symbols",
     *["    " + lib_texts[l].replace("\n", "\n    ") for l in lib_ids],

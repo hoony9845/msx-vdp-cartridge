@@ -22,6 +22,16 @@ def add_track(board, a, b, net, width, layer=pcbnew.F_Cu):
     board.Add(t)
 
 
+def add_via(board, pos, net, d=0.6, drill=0.3):
+    v = pcbnew.PCB_VIA(board)
+    v.SetPosition(V(*pos))
+    v.SetWidth(MM(d))
+    v.SetDrill(MM(drill))
+    v.SetNet(net)
+    v.SetLocked(True)
+    board.Add(v)
+
+
 def prerouted_hdmi_ground(board, j2):
     """HDMI pads are a single 0.5mm-pitch row, so the TMDS shield pads
     (2, 5, 8, 11) and pin 17 cannot be routed between the signal traces.
