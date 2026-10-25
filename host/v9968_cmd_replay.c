@@ -24,8 +24,7 @@ static const uint8_t mode_r1[10] = { 0, 0, 0, 0, 0, 0, 0, 0x10, 0x10, 0x08 };
 /* Run until the command ends or waits for the CPU. */
 static void run(void) {
     for (int i = 0; i < 10000000 && v9968_cmd_busy(&vdp); i++) {
-        if (vdp.cmd.transfer_ready) break;
-        if (!v9968_cmd_step(&vdp, 1u << 16)) break;      /* waiting */
+        if (!v9968_cmd_step(&vdp, 1u << 16)) break;      /* waiting for the CPU */
     }
 }
 
@@ -57,7 +56,17 @@ int main(int argc, char **argv) {
         unsigned reg, val;
         switch (op[0]) {
         case 'W':
-            if (fscanf(in, "%u %x", &reg, &val) == 2) v9968_cmd_write_reg(&vdp, reg, (uint8_t)val);
+            if (fscanf(in, "%u %x", &reg, &val) != 2) break;
+            {
+                /* the RTL keeps running while the next command's registers
+                 * are written: a command still waiting for CPU data takes
+                 * that R#44 as data at once */
+                unsigned op = vdp.cmd.op;
+                bool waiting = v9968_cmd_busy(&vdp) && vdp.cmd.transfer_ready &&
+                               (op == 0xB || op == 0xF || op == 0x2);   /* LMMC HMMC LFMC */
+                v9968_cmd_write_reg(&vdp, reg, (uint8_t)val);
+                if (reg == 44 && waiting) run();
+            }
             break;
         case 'T':
             if (fscanf(in, "%x", &val) != 1) break;

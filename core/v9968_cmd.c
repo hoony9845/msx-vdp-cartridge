@@ -535,6 +535,13 @@ static bool step_one(ctx_t *x) {
     }
 
     case ST_LMCM:
+        /* checked before the first read: a start already past the edge of
+         * the last line reads nothing (later the RTL repeats the check on
+         * the counters LMCM_WAIT already checked) */
+        if (!c->lmcm_lag) {
+            conditions(x, &k);
+            if (k.line_end && k.ny_end) { finish(x, false); break; }
+        }
         if (c->rtl_lmcm) {
             uint16_t rx = c->lmcm_lag ? c->lmcm_dx : c->dx;
             uint16_t ry = c->lmcm_lag ? c->lmcm_dy : c->dy;
