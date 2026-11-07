@@ -105,7 +105,8 @@ USB 시리얼 명령(진단용):
 | 비트맵 커서 2개 (32×32, 팔레트/EOR, 커서 0 우선) | ✅ (PC 테스트, openMSX 동작 기준) |
 | 펌웨어: PIO 버스, DVI 출력, PSRAM, 듀얼 코어 | ✅ 실기 확인 (Core2350B: Chase H.Q. 주행, Petscii Robots 게임 화면) |
 | YJK/YUV, R#16 화면 위치 조정 | ⬜ TODO |
-| 커맨드: LMCM, CMMK, BMxx, SRCH, POINT, ADVN, P1/P2 좌표계 | ⬜ TODO |
+| 커맨드 P1/P2 좌표계 (openMSX와 같은 매핑, 실기 Ghosts'n Goblins에서 확인) | ✅ |
+| 커맨드: LMCM, CMMK, BMxx, SRCH, POINT, ADVN | ⬜ TODO |
 | HR 비트 (펌웨어: DVI 두 줄마다 토글) | ✅ 기본 |
 | 커맨드 실행 시간, 라인 타이밍 정밀도, PAL 50Hz 타이밍 | ⬜ TODO |
 | 15kHz RGB 출력 (PIO + 저항 DAC) | ⬜ 선택 사항 |
@@ -122,6 +123,8 @@ USB 시리얼 명령(진단용):
   - **Dreams Puzzle**(B3 BD16, LINE), **Mr. Balloon remake**(B7 1024 BP4): VRAM이 26/30 시점에서 같고,
     나머지는 직전 프레임에 시작된 커맨드 영역뿐이다(openMSX는 커맨드에 시간이 걸림). B7 화면은 openMSX
     캡처가 640픽셀로 줄어 도트 비교를 할 수 없다.
+- **Ghosts'n Goblins**(ASM Team, V9990 데모, Konami SCC 2MB, B1 BP6/BP4 + P1 스프라이트, P1에서 LMMV/LMMM):
+  직접 플레이한 기록 66장 모두 일치. P1 커맨드 좌표계가 없을 때는 악마 스프라이트가 깨졌다.
 펌웨어의 렌더러는 스캔보다 2–3줄 앞서 그리므로, 화면 중간의 레지스터 변경은 몇 줄 일찍 적용된다(TODO).
 새 프레임은 첫 줄 4줄 전에 시작한다(라인 카운터 리셋): 그 전에 VI 핸들러가 쓴 스크롤이 첫 줄부터 적용된다.
 
