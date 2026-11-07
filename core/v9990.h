@@ -64,7 +64,11 @@ typedef struct {
 } v9990_cmd_state_t;
 
 typedef struct v9990 {
-    uint8_t  *vram;         /* 512KB, physical layout (see v9990_vram.h) */
+    /* VRAM in physical layout (see v9990_vram.h), as two 256KB banks:
+     * physical 0x00000-0x3FFFF (VRAM0) and 0x40000-0x7FFFF (VRAM1). They
+     * may live in different memories (the firmware keeps VRAM0 in SRAM). */
+    uint8_t  *vram;         /* VRAM0 */
+    uint8_t  *vram1;        /* VRAM1 (vram + 0x40000 when contiguous) */
 
     uint8_t  regs[V9990_NUM_REGS];
     uint8_t  reg_select;    /* P#4 */
@@ -90,6 +94,7 @@ typedef struct v9990 {
      * according to openMSX); the high bytes are latched per frame. */
     volatile uint16_t line_offset_a, line_offset_b;
     uint8_t  scroll_ay_high, scroll_by_high;
+    volatile uint32_t frame;          /* counts vblank ends (renderer caches) */
 
     /* Optional (kept by v9990_reset): copy `len` bytes of physical VRAM
      * from `phys` to `dst`. The bitmap renderer fetches each row with it,
@@ -98,7 +103,8 @@ typedef struct v9990 {
 } v9990_t;
 
 /* ---- lifecycle ---- */
-void v9990_init(v9990_t *v, uint8_t *vram);
+void v9990_init(v9990_t *v, uint8_t *vram);   /* contiguous 512KB */
+void v9990_init_banks(v9990_t *v, uint8_t *vram0, uint8_t *vram1);
 void v9990_reset(v9990_t *v);
 
 /* ---- bus interface (port = low nibble 0..15) ---- */

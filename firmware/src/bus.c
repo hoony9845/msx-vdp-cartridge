@@ -414,8 +414,9 @@ void bus_print_vram_crc(void) {
     if (chip != VDP_CHIP_V9990 || !v9990) { printf("vram: V9990 only\n"); return; }
     printf("vram crc:");
     for (uint i = 0; i < 8; i++)
-        printf(" %08lx", (unsigned long)crc32_block(v9990->vram + i * 65536u, 65536u));
-    printf("\nall %08lx\n", (unsigned long)crc32_block(v9990->vram, V9990_VRAM_SIZE));
+        printf(" %08lx", (unsigned long)crc32_block(
+                   (i < 4 ? v9990->vram : v9990->vram1) + (i & 3u) * 65536u, 65536u));
+    printf("\n");
 }
 
 /* USB serial "out <port> <value>" (hex): a V9990 port write from core0,

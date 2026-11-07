@@ -10,19 +10,26 @@ static uint16_t palette_to_rgb565(const v9990_palette_entry_t *p) {
     return (uint16_t)((r << 11) | (g << 6) | ((g >> 4) << 5) | b);
 }
 
-void v9990_init(v9990_t *v, uint8_t *vram) {
+void v9990_init_banks(v9990_t *v, uint8_t *vram0, uint8_t *vram1) {
     memset(v, 0, sizeof(*v));
-    v->vram = vram;
-    memset(vram, 0, V9990_VRAM_SIZE);
+    v->vram = vram0;
+    v->vram1 = vram1;
+    memset(vram0, 0, V9990_VRAM_SIZE / 2);
+    memset(vram1, 0, V9990_VRAM_SIZE / 2);
     v9990_reset(v);
 }
 
+void v9990_init(v9990_t *v, uint8_t *vram) {
+    v9990_init_banks(v, vram, vram + V9990_VRAM_SIZE / 2);
+}
+
 void v9990_reset(v9990_t *v) {
-    uint8_t *vram = v->vram;
+    uint8_t *vram = v->vram, *vram1 = v->vram1;
     uint8_t sys = v->sys_ctrl;
     void (*fetch)(const struct v9990 *, uint32_t, uint8_t *, uint32_t) = v->vram_fetch;
     memset(v, 0, sizeof(*v));
     v->vram = vram;
+    v->vram1 = vram1;
     v->sys_ctrl = sys;
     v->vram_fetch = fetch;
     for (unsigned i = 0; i < V9990_PALETTE_ENTRIES; i++)
@@ -225,7 +232,7 @@ V9990_HOT v9990_display_mode_t v9990_display_mode(const v9990_t *v) {
     }
 }
 
-v9990_color_mode_t v9990_color_mode(const v9990_t *v) {
+V9990_HOT v9990_color_mode_t v9990_color_mode(const v9990_t *v) {
     uint8_t r6 = v->regs[V9990_R_SCREEN_MODE0];
     uint8_t r13 = v->regs[V9990_R_PALETTE_CTRL];
     bool yae = (r13 & 0x20) != 0;
@@ -243,15 +250,15 @@ v9990_color_mode_t v9990_color_mode(const v9990_t *v) {
     }
 }
 
-unsigned v9990_bpp(const v9990_t *v) {
+V9990_HOT unsigned v9990_bpp(const v9990_t *v) {
     return 2u << V9990_CLRM(v->regs[V9990_R_SCREEN_MODE0]);
 }
 
-unsigned v9990_image_width(const v9990_t *v) {
+V9990_HOT unsigned v9990_image_width(const v9990_t *v) {
     return 256u << V9990_XIMM(v->regs[V9990_R_SCREEN_MODE0]);
 }
 
-unsigned v9990_display_width(const v9990_t *v) {
+V9990_HOT unsigned v9990_display_width(const v9990_t *v) {
     switch (v9990_display_mode(v)) {
     case V9990_MODE_P1: case V9990_MODE_B1: return 256;
     case V9990_MODE_B2: return 384;
@@ -289,6 +296,7 @@ V9990_HOT void v9990_video_vblank_start(v9990_t *v) {
 
 V9990_HOT void v9990_video_vblank_end(v9990_t *v) {
     /* new frame: line counters restart, high scroll bytes are latched */
+    v->frame++;
     v->cur_line = 0;
     v->line_offset_a = 0;
     v->line_offset_b = 0;

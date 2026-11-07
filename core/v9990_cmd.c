@@ -19,13 +19,13 @@
 #include "v9990.h"
 #include "v9990_vram.h"
 
-static uint16_t reg16(const v9990_t *v, unsigned lo) {
+V9990_HOT static uint16_t reg16(const v9990_t *v, unsigned lo) {
     return (uint16_t)(v->regs[lo] | (v->regs[lo + 1] << 8));
 }
 
 /* Bitwise logical operation. LOP bit L<s><d> gives the result for a source
  * bit s and destination bit d, e.g. 0x0C = IMP (copy source). */
-static inline unsigned logop(uint8_t lop, unsigned s, unsigned d) {
+V9990_HOT static inline unsigned logop(uint8_t lop, unsigned s, unsigned d) {
     unsigned r = 0;
     if (lop & 0x8) r |=  s &  d;
     if (lop & 0x4) r |=  s & ~d;
@@ -34,7 +34,7 @@ static inline unsigned logop(uint8_t lop, unsigned s, unsigned d) {
     return r;
 }
 
-static void write_pixel(v9990_t *v, unsigned x, unsigned y, unsigned color) {
+V9990_HOT static void write_pixel(v9990_t *v, unsigned x, unsigned y, unsigned color) {
     const unsigned bpp = v9990_bpp(v);
     const unsigned iw = v9990_image_width(v);
     const uint8_t lop = v->regs[V9990_R_CMD_LOP];
@@ -65,7 +65,7 @@ static void write_pixel(v9990_t *v, unsigned x, unsigned y, unsigned color) {
 }
 
 /* Colour of dot (x, y) taken from a 16-bit FC/BC style register pair. */
-static unsigned color_at(const v9990_t *v, unsigned x, unsigned y, uint16_t reg) {
+V9990_HOT static unsigned color_at(const v9990_t *v, unsigned x, unsigned y, uint16_t reg) {
     const unsigned bpp = v9990_bpp(v);
     if (bpp == 16) return reg;
     const unsigned iw = v9990_image_width(v);
@@ -74,7 +74,7 @@ static unsigned color_at(const v9990_t *v, unsigned x, unsigned y, uint16_t reg)
     return (byte >> (8u - bpp - (bit & 7u))) & ((1u << bpp) - 1u);
 }
 
-static unsigned read_pixel(const v9990_t *v, unsigned x, unsigned y) {
+V9990_HOT static unsigned read_pixel(const v9990_t *v, unsigned x, unsigned y) {
     const unsigned bpp = v9990_bpp(v);
     const unsigned iw = v9990_image_width(v);
     x &= iw - 1u;
@@ -85,7 +85,7 @@ static unsigned read_pixel(const v9990_t *v, unsigned x, unsigned y) {
     return (v9990_vram_read_bx(v, addr) >> (8u - bpp - (bit & 7u))) & ((1u << bpp) - 1u);
 }
 
-static void finish(v9990_t *v) {
+V9990_HOT static void finish(v9990_t *v) {
     v->cmd.op = 0;
     V9990_CLR_BITS(v->status, V9990_ST_CE | V9990_ST_TR);
     V9990_SET_BITS(v->int_flags, V9990_INT_CE);
@@ -93,7 +93,7 @@ static void finish(v9990_t *v) {
 
 /* Advance the destination cursor of a rectangle command.
  * Returns false when the rectangle is complete. */
-static bool advance_rect(v9990_t *v) {
+V9990_HOT static bool advance_rect(v9990_t *v) {
     const uint8_t arg = v->regs[V9990_R_CMD_ARG];
     const int dx = (arg & V9990_ARG_DIX) ? -1 : 1;
     const int dy = (arg & V9990_ARG_DIY) ? -1 : 1;
@@ -111,13 +111,13 @@ static bool advance_rect(v9990_t *v) {
 }
 
 /* Write dot (x, y) with the colour from FC (bit = 1) or BC (bit = 0). */
-static void write_fc_bc(v9990_t *v, unsigned x, unsigned y, bool fc) {
+V9990_HOT static void write_fc_bc(v9990_t *v, unsigned x, unsigned y, bool fc) {
     uint16_t reg = reg16(v, fc ? V9990_R_CMD_FC0 : V9990_R_CMD_BC0);
     write_pixel(v, x, y, color_at(v, x, y, reg));
 }
 
 /* One character bit (CMMC/CMMM); returns false when the rectangle is done. */
-static bool character_bit(v9990_t *v, bool bit) {
+V9990_HOT static bool character_bit(v9990_t *v, bool bit) {
     write_fc_bc(v, v->cmd.x, v->cmd.y, bit);
     if (!advance_rect(v)) {
         finish(v);
@@ -126,7 +126,7 @@ static bool character_bit(v9990_t *v, bool bit) {
     return true;
 }
 
-void v9990_cmd_start(v9990_t *v) {
+V9990_HOT void v9990_cmd_start(v9990_t *v) {
     v9990_cmd_state_t *c = &v->cmd;
     c->op = v->regs[V9990_R_CMD_OP] >> 4;
     c->sx = reg16(v, V9990_R_CMD_SX0) & 0x07FF;
@@ -252,7 +252,7 @@ V9990_HOT bool v9990_cmd_step(v9990_t *v, unsigned budget) {
     return v->cmd.op != 0;
 }
 
-void v9990_cmd_write_data(v9990_t *v, uint8_t data) {
+V9990_HOT void v9990_cmd_write_data(v9990_t *v, uint8_t data) {
     if (v->cmd.op == V9990_CMD_CMMC) {
         for (unsigned i = 0; i < 8; i++, data = (uint8_t)(data << 1))
             if (!character_bit(v, (data & 0x80) != 0)) return;
@@ -285,7 +285,7 @@ void v9990_cmd_write_data(v9990_t *v, uint8_t data) {
     }
 }
 
-uint8_t v9990_cmd_read_data(v9990_t *v) {
+V9990_HOT uint8_t v9990_cmd_read_data(v9990_t *v) {
     /* TODO: LMCM / POINT */
     return v->cmd_read_latch;
 }

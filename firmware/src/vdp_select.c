@@ -110,6 +110,11 @@ static void command(const char *line, vdp_chip_t current) {
         bus_debug_out((unsigned)port, (unsigned)value);
         return;
     }
+    if (strncmp(line, "bench", 5) == 0) {
+        extern void main_bench(void);
+        main_bench();
+        return;
+    }
     if (strncmp(line, "vram", 4) == 0) {
         bus_print_vram_crc();
         return;
@@ -119,7 +124,7 @@ static void command(const char *line, vdp_chip_t current) {
         return;
     }
     if (strncmp(line, "chip", 4) != 0) {
-        if (*line) printf("commands: chip [v9990|v9968], stat [reset], psram [sweep], vram, out <port> <val>\n");
+        if (*line) printf("commands: chip [v9990|v9968], stat [reset], psram [sweep], vram, out <port> <val>, bench\n");
         return;
     }
     line += 4;

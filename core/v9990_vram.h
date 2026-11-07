@@ -34,21 +34,27 @@ static inline uint32_t v9990_vram_phys(const v9990_t *v, uint32_t addr) {
     }
 }
 
+/* Byte at physical address `phys` (bit 18 selects the bank). */
+static inline uint8_t *v9990_vram_ptr(const v9990_t *v, uint32_t phys) {
+    return (phys & 0x40000u) ? v->vram1 + (phys & 0x3FFFFu) : v->vram + (phys & 0x3FFFFu);
+}
+
 static inline uint8_t v9990_vram_read(const v9990_t *v, uint32_t addr) {
-    return v->vram[v9990_vram_phys(v, addr)];
+    return *v9990_vram_ptr(v, v9990_vram_phys(v, addr));
 }
 
 static inline void v9990_vram_write(v9990_t *v, uint32_t addr, uint8_t data) {
-    v->vram[v9990_vram_phys(v, addr)] = data;
+    *v9990_vram_ptr(v, v9990_vram_phys(v, addr)) = data;
 }
 
-/* Bitmap-mode linear access, used by the renderer and command engine. */
+/* Bitmap-mode linear access, used by the renderer and command engine:
+ * even addresses in VRAM0, odd ones in VRAM1. */
 static inline uint8_t v9990_vram_read_bx(const v9990_t *v, uint32_t addr) {
-    return v->vram[v9990_vram_transform_bx(addr & V9990_VRAM_MASK)];
+    return ((addr & 1u) ? v->vram1 : v->vram)[(addr & V9990_VRAM_MASK) >> 1];
 }
 
 static inline void v9990_vram_write_bx(v9990_t *v, uint32_t addr, uint8_t data) {
-    v->vram[v9990_vram_transform_bx(addr & V9990_VRAM_MASK)] = data;
+    ((addr & 1u) ? v->vram1 : v->vram)[(addr & V9990_VRAM_MASK) >> 1] = data;
 }
 
 #endif

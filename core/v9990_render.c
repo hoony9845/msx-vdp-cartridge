@@ -21,13 +21,10 @@
 #define TRANSPARENT 0xFF          /* "no pixel" in a palette-index line */
 
 /* Work buffers for the pattern modes. Only one core renders. */
-static uint8_t line_a[512];       /* layer A / image plane, palette index */
-static uint8_t line_b[512];       /* layer B (P1 only) */
-static uint8_t line_pix[512];     /* composed line, palette index */
-static uint8_t line_info[512];    /* 0 = backdrop, 1 = front layer, 2 = sprite */
+static uint8_t line_info[512];    /* sprite priority: 0 none, 1 front layer, 2 sprite */
 static uint16_t line_rgb[1024];   /* source-resolution RGB565 */
 
-static inline uint16_t bd8_to_rgb565(uint8_t c) {
+V9990_HOT static inline uint16_t bd8_to_rgb565(uint8_t c) {
     /* GGGRRRBB */
     uint16_t g = (c >> 5) & 7, r = (c >> 2) & 7, b = c & 3;
     uint16_t r5 = (uint16_t)((r << 2) | (r >> 1));
@@ -36,27 +33,27 @@ static inline uint16_t bd8_to_rgb565(uint8_t c) {
     return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
 }
 
-static inline uint16_t bd16_to_rgb565(uint16_t c) {
+V9990_HOT static inline uint16_t bd16_to_rgb565(uint16_t c) {
     /* YS(15) G(14-10) R(9-5) B(4-0) */
     uint16_t g = (c >> 10) & 0x1F, r = (c >> 5) & 0x1F, b = c & 0x1F;
     return (uint16_t)((r << 11) | (g << 6) | ((g >> 4) << 5) | b);
 }
 
-uint16_t v9990_backdrop_rgb565(const v9990_t *v) {
+V9990_HOT uint16_t v9990_backdrop_rgb565(const v9990_t *v) {
     return v->palette_rgb565[v->regs[V9990_R_BACKDROP] & 0x3F];
 }
 
-static void fill(uint16_t *out, unsigned n, uint16_t c) {
+V9990_HOT static void fill(uint16_t *out, unsigned n, uint16_t c) {
     while (n--) *out++ = c;
 }
 
 /* Pick an integer upscale if possible, otherwise squeeze to fit. */
-static unsigned scaled_width(unsigned src_w, unsigned out_w) {
+V9990_HOT static unsigned scaled_width(unsigned src_w, unsigned out_w) {
     if (src_w > out_w) return out_w;
     return src_w * (out_w / src_w);
 }
 
-static void scale_copy(const uint16_t *src, unsigned src_w, uint16_t *dst, unsigned dst_w) {
+V9990_HOT static void scale_copy(const uint16_t *src, unsigned src_w, uint16_t *dst, unsigned dst_w) {
     uint32_t step = (uint32_t)(((uint64_t)src_w << 16) / dst_w);
     uint32_t pos = 0;
     for (unsigned i = 0; i < dst_w; i++, pos += step)
@@ -68,7 +65,7 @@ static void scale_copy(const uint16_t *src, unsigned src_w, uint16_t *dst, unsig
 /* ------------------------------------------------------------------ */
 
 /* Roll mask from R#18 bits 7-6 (R512/R256); 0 = roll at the image height. */
-static unsigned roll_mask(const v9990_t *v, unsigned image_mask) {
+V9990_HOT static unsigned roll_mask(const v9990_t *v, unsigned image_mask) {
     switch (v->regs[V9990_R_SCROLL_AY_HI] >> 6) {
     case 0:  return image_mask;
     case 2:  return 0x1FF;
@@ -77,7 +74,7 @@ static unsigned roll_mask(const v9990_t *v, unsigned image_mask) {
 }
 
 /* Image Y of layer A for a display line. */
-static unsigned image_y_a(const v9990_t *v, unsigned line, unsigned image_mask) {
+V9990_HOT static unsigned image_y_a(const v9990_t *v, unsigned line, unsigned image_mask) {
     unsigned scroll = v->regs[V9990_R_SCROLL_AY_LO] | ((v->scroll_ay_high & 0x1Fu) << 8);
     unsigned mask = roll_mask(v, image_mask);
     unsigned base = scroll & ~mask & image_mask;
@@ -98,56 +95,137 @@ typedef struct {
     uint8_t  pal_even, pal_odd;  /* palette offsets for even/odd PGT bytes */
 } pattern_layer_t;
 
-/* One line of a pattern layer into palette indices (TRANSPARENT for 0). */
-static void render_pattern_layer(const v9990_t *v, const pattern_layer_t *l,
-                                 unsigned img_x, unsigned img_y,
-                                 uint8_t *out, unsigned width) {
+/* VRAM fetch of `len` physical bytes (the platform may stream them). */
+V9990_HOT static void fetch_phys(const v9990_t *v, uint32_t phys, uint8_t *dst, uint32_t len) {
+    if (v->vram_fetch) v->vram_fetch(v, phys, dst, len);
+    else               memcpy(dst, v9990_vram_ptr(v, phys), len);
+}
+
+/* Name table rows of the two layers. A row is fetched again only for
+ * another tile row, table or frame: a name written in the middle of a
+ * frame can show up to 7 lines later than on the real chip. */
+static uint8_t name_cache[2][256] __attribute__((aligned(4)));
+static uint32_t name_tag[2][2] = { { ~0u, ~0u }, { ~0u, ~0u } };    /* {address, frame} */
+static const uint8_t *name_row;
+static const uint8_t *spat;           /* sprite attribute table (in VRAM0) */
+
+V9990_HOT static void select_name_row(const v9990_t *v, const pattern_layer_t *l, unsigned img_y) {
+    uint32_t addr = l->name_base + (img_y >> 3) * l->names_per_row * 2u;
+    unsigned slot = (l->name_base == V9990_P1_PNT_B) ? 1u : 0u;
+    if (name_tag[slot][0] != addr || name_tag[slot][1] != v->frame) {
+        fetch_phys(v, addr, name_cache[slot], l->names_per_row * 2u);
+        name_tag[slot][0] = addr;
+        name_tag[slot][1] = v->frame;
+    }
+    name_row = name_cache[slot];
+}
+
+/* 4 bytes (8 dots, left dot in the MSBs) of the pattern row under image
+ * dot x. The layer's name row must be in name_row. */
+V9990_HOT static inline void pattern_row(const v9990_t *v, const pattern_layer_t *l, bool p2,
+                                         unsigned x, unsigned img_y, uint8_t b[4]) {
     const unsigned pats_per_row = l->pgt_pitch * 2 / 8;
-    uint32_t row_addr = 0;
-    for (unsigned i = 0; i < width; i++) {
-        unsigned x = (img_x + i) & l->x_mask;
-        if (i == 0 || (x & 7) == 0) {
-            uint32_t na = l->name_base + ((img_y >> 3) * l->names_per_row + (x >> 3)) * 2;
-            unsigned pat = (v9990_vram_read(v, na) | (v9990_vram_read(v, na + 1) << 8)) & 0x1FFF;
-            row_addr = l->pgt_base
-                     + ((pat / pats_per_row) * 8 + (img_y & 7)) * l->pgt_pitch
-                     + (pat % pats_per_row) * 4;
-        }
-        uint32_t a = row_addr + ((x & 7) >> 1);
-        uint8_t byte = v9990_vram_read(v, a);
-        uint8_t c = (x & 1) ? (byte & 0x0F) : (byte >> 4);     /* left pixel in the MSBs */
-        out[i] = c ? (uint8_t)(((a & 1) ? l->pal_odd : l->pal_even) + c) : TRANSPARENT;
+    unsigned n = (x >> 3) * 2u;
+    unsigned pat = (name_row[n] | (name_row[n + 1] << 8)) & 0x1FFF;
+    uint32_t a = l->pgt_base + ((pat / pats_per_row) * 8 + (img_y & 7)) * l->pgt_pitch
+               + (pat % pats_per_row) * 4;
+    if (p2) {               /* even bytes in bank 0, odd bytes in bank 1 */
+        uint32_t e = (a & 0x7FFFCu) >> 1;
+        b[0] = v->vram[e];  b[2] = v->vram[e + 1];
+        b[1] = v->vram1[e]; b[3] = v->vram1[e + 1];
+    } else {
+        const uint8_t *q = v9990_vram_ptr(v, a & V9990_VRAM_MASK);
+        b[0] = q[0]; b[1] = q[1]; b[2] = q[2]; b[3] = q[3];
     }
 }
 
-/* Sprites of the pattern modes on top of line_pix / line_info. */
-static void render_sprites(const v9990_t *v, bool p2, unsigned line, unsigned width) {
-    if (v->regs[V9990_R_CONTROL] & V9990_R8_SPD) return;
+/* Draw dots [start, end) of a pattern layer into col (RGB565), image dot
+ * img_x at col[0]. tab_e / tab_o: colour of each 4-bit value for even /
+ * odd pattern bytes. Back layer: every dot, value 0 = tab[0] (backdrop).
+ * Front layer: value 0 is transparent; opaque dots set info[] to 1 if
+ * info is given (for the sprite priorities). */
+V9990_HOT static void draw_layer(const v9990_t *v, const pattern_layer_t *l, bool p2,
+                                 unsigned img_x, unsigned img_y, uint16_t *col,
+                                 unsigned start, unsigned end, bool front, uint8_t *info,
+                                 const uint16_t *tab_e, const uint16_t *tab_o) {
+    select_name_row(v, l, img_y);
+    unsigned x = (img_x + start) & l->x_mask;
+    for (unsigned i = start; i < end; ) {
+        uint8_t b[4];
+        pattern_row(v, l, p2, x, img_y, b);
+        unsigned d = x & 7u, n = 8u - d;
+        if (n > end - i) n = end - i;
+        if (n == 8) {                           /* whole tile: unrolled */
+            uint16_t *c = col + i;
+            if (!front) {
+                c[0] = tab_e[b[0] >> 4]; c[1] = tab_e[b[0] & 15];
+                c[2] = tab_o[b[1] >> 4]; c[3] = tab_o[b[1] & 15];
+                c[4] = tab_e[b[2] >> 4]; c[5] = tab_e[b[2] & 15];
+                c[6] = tab_o[b[3] >> 4]; c[7] = tab_o[b[3] & 15];
+            } else if (b[0] | b[1] | b[2] | b[3]) {
+                for (unsigned k = 0; k < 4; k++) {
+                    const uint16_t *t = (k & 1) ? tab_o : tab_e;
+                    unsigned hi = b[k] >> 4, lo = b[k] & 15u;
+                    if (hi) { c[2 * k] = t[hi];     if (info) info[i + 2 * k] = 1; }
+                    if (lo) { c[2 * k + 1] = t[lo]; if (info) info[i + 2 * k + 1] = 1; }
+                }
+            }
+            i += 8;
+            x = (x + 8u) & l->x_mask;
+            continue;
+        }
+        if (front && (b[0] | b[1] | b[2] | b[3]) == 0) {   /* fully transparent */
+            i += n;
+            x = (x + n) & l->x_mask;
+            continue;
+        }
+        for (unsigned j = 0; j < n; j++, d++, i++) {
+            unsigned k = d >> 1;
+            unsigned c = (d & 1) ? (b[k] & 0x0Fu) : (b[k] >> 4);
+            if (front) {
+                if (!c) continue;
+                if (info) info[i] = 1;
+            }
+            col[i] = ((k & 1) ? tab_o : tab_e)[c];
+        }
+        x = (x + n) & l->x_mask;
+    }
+}
 
-    const uint32_t spat = p2 ? V9990_P2_SPAT : V9990_P1_SPAT;
-    const uint8_t r25 = v->regs[V9990_R_SPRITE_PGT];
-    const uint32_t sgt = p2 ? ((uint32_t)(r25 & 0x0F) << 15) : ((uint32_t)(r25 & 0x0E) << 14);
+/* Sprites of the pattern modes over col. info: 0 = nothing in front,
+ * 1 = front layer, 2 = sprite (a sprite also hides later ones where it is
+ * itself behind the front layer). The attribute table (0x3FE00 P1,
+ * 0x7BE00 P2: both at physical 0x3FE00) is fetched once per line. */
+static uint8_t sprite_list[16];
 
+V9990_HOT static unsigned scan_sprites(const v9990_t *v, unsigned line) {
+    if (v->regs[V9990_R_CONTROL] & V9990_R8_SPD) return 0;
+    spat = v9990_vram_ptr(v, 0x3FE00u);        /* 500 bytes, all in VRAM0 */
     /* Up to 16 sprites per line; hidden (PR0) ones still count. */
-    uint8_t visible[16];
     unsigned count = 0, limit = 16;
     for (unsigned s = 0; s < 125 && count < limit; s++) {
-        uint32_t a = spat + 4 * s;
-        uint8_t row = (uint8_t)(line - (uint8_t)(v9990_vram_read(v, a) + 1));
+        const uint8_t *a = spat + 4 * s;
+        uint8_t row = (uint8_t)(line - (uint8_t)(a[0] + 1));
         if (row >= 16) continue;
-        if (v9990_vram_read(v, a + 3) & V9990_SPR_PR0)
+        if (a[3] & V9990_SPR_PR0)
             limit--;
         else
-            visible[count++] = (uint8_t)s;
+            sprite_list[count++] = (uint8_t)s;
     }
+    return count;
+}
 
+V9990_HOT static void draw_sprites(const v9990_t *v, bool p2, unsigned line, unsigned count,
+                                   uint16_t *col, uint8_t *info, unsigned width) {
+    const uint8_t r25 = v->regs[V9990_R_SPRITE_PGT];
+    const uint32_t sgt = p2 ? ((uint32_t)(r25 & 0x0F) << 15) : ((uint32_t)(r25 & 0x0E) << 14);
     /* Lower sprite numbers win: draw in order and never overwrite a sprite. */
     for (unsigned k = 0; k < count; k++) {
-        uint32_t a = spat + 4 * visible[k];
-        uint8_t attr = v9990_vram_read(v, a + 3);
-        uint8_t pat  = v9990_vram_read(v, a + 1);
-        uint8_t row  = (uint8_t)(line - (uint8_t)(v9990_vram_read(v, a) + 1));
-        int x = v9990_vram_read(v, a + 2) | ((attr & 0x03) << 8);
+        const uint8_t *a = spat + 4 * sprite_list[k];
+        uint8_t attr = a[3];
+        uint8_t pat  = a[1];
+        uint8_t row  = (uint8_t)(line - (uint8_t)(a[0] + 1));
+        int x = a[2] | ((attr & 0x03) << 8);
         if (x > 1008) x -= 1024;                 /* partly off the left edge */
         uint8_t level = (attr & V9990_SPR_PR1) ? 1 : 2;   /* behind / in front of layer */
         uint8_t pal = (attr >> 2) & 0x30;        /* SC5-SC4 */
@@ -160,27 +238,40 @@ static void render_sprites(const v9990_t *v, bool p2, unsigned line, unsigned wi
                 int px = x + (int)(2 * i + h);
                 uint8_t c = h ? (byte & 0x0F) : (byte >> 4);
                 if (!c || px < 0 || px >= (int)width) continue;
-                if (line_info[px] < level) line_pix[px] = (uint8_t)(pal + c);
-                line_info[px] = 2;   /* also when hidden behind the front layer */
+                if (info[px] < level) col[px] = v->palette_rgb565[(pal + c) & 0x3F];
+                info[px] = 2;   /* also when hidden behind the front layer */
             }
         }
     }
 }
 
-static void render_pattern_mode(const v9990_t *v, bool p2, unsigned line, unsigned width) {
+/* One line of P1 / P2 into col (RGB565, `width` source dots). */
+V9990_HOT static void render_pattern_mode(const v9990_t *v, bool p2, unsigned line,
+                                          uint16_t *col, unsigned width) {
     const uint8_t r13 = v->regs[V9990_R_PALETTE_CTRL];
     const uint8_t pal_a = (uint8_t)((r13 & 0x03) << 4);
     const uint8_t pal_b = (uint8_t)((r13 & 0x0C) << 2);
     const unsigned scax = (v->regs[V9990_R_SCROLL_AX_HI] << 3) | (v->regs[V9990_R_SCROLL_AX_LO] & 7);
+    const uint16_t backdrop = v9990_backdrop_rgb565(v);
+
+    /* colour tables, entry 0 = backdrop (only used by a back layer) */
+    uint16_t tab_a[16], tab_b[16];
+    tab_a[0] = tab_b[0] = backdrop;
+    for (unsigned c = 1; c < 16; c++) {
+        tab_a[c] = v->palette_rgb565[(pal_a + c) & 0x3F];
+        tab_b[c] = v->palette_rgb565[(pal_b + c) & 0x3F];
+    }
+
+    unsigned sprites = scan_sprites(v, line);
+    uint8_t *info = sprites ? line_info : NULL;
+    if (info) for (unsigned i = 0; i < width; i++) info[i] = 0;
 
     if (p2) {
         /* single 1024x512 image plane; even/odd PGT bytes use two palettes */
         pattern_layer_t l = { V9990_P2_PNT, V9990_P2_PGT, 128, 256, 1023, pal_a, pal_b };
-        render_pattern_layer(v, &l, scax, image_y_a(v, line, 0x1FF), line_a, width);
-        for (unsigned i = 0; i < width; i++) {
-            line_pix[i] = line_a[i];
-            line_info[i] = line_a[i] != TRANSPARENT;
-        }
+        fill(col, width, backdrop);
+        draw_layer(v, &l, true, scax, image_y_a(v, line, 0x1FF), col, 0, width, true, info,
+                   tab_a, tab_b);
     } else {
         pattern_layer_t la = { V9990_P1_PNT_A, V9990_P1_PGT_A, 64, 128, 511, pal_a, pal_a };
         pattern_layer_t lb = { V9990_P1_PNT_B, V9990_P1_PGT_B, 64, 128, 511, pal_b, pal_b };
@@ -188,28 +279,22 @@ static void render_pattern_mode(const v9990_t *v, bool p2, unsigned line, unsign
                         (v->regs[V9990_R_SCROLL_BX_LO] & 7);
         unsigned scby = v->regs[V9990_R_SCROLL_BY_LO] | ((v->scroll_by_high & 1u) << 8);
         unsigned yb = ((line - v->line_offset_b) + scby) & 0x1FF;   /* B always rolls at 512 */
-        render_pattern_layer(v, &la, scax, image_y_a(v, line, 0x1FF), line_a, width);
-        render_pattern_layer(v, &lb, scbx, yb, line_b, width);
+        unsigned ya = image_y_a(v, line, 0x1FF);
 
         /* Layer B is in front right of PRX and from PRY down (R#27). */
         uint8_t r27 = v->regs[V9990_R_PRIORITY_CTRL];
         unsigned prx = (r27 & 0x03) ? (r27 & 0x03) * 64u : 256u;
         unsigned pry = (r27 & 0x0C) ? ((r27 >> 2) & 3) * 64u : 256u;
         if (line >= pry) prx = 0;
-        for (unsigned i = 0; i < width; i++) {
-            bool b_front = i >= prx;
-            uint8_t front = b_front ? line_b[i] : line_a[i];
-            uint8_t rear  = b_front ? line_a[i] : line_b[i];
-            line_pix[i] = front != TRANSPARENT ? front : rear;
-            line_info[i] = front != TRANSPARENT;
-        }
+        if (prx > width) prx = width;
+        /* back layers first: B left of PRX, A right of it; then the fronts */
+        if (prx > 0)     draw_layer(v, &lb, false, scbx, yb, col, 0, prx, false, NULL, tab_b, tab_b);
+        if (prx < width) draw_layer(v, &la, false, scax, ya, col, prx, width, false, NULL, tab_a, tab_a);
+        if (prx > 0)     draw_layer(v, &la, false, scax, ya, col, 0, prx, true, info, tab_a, tab_a);
+        if (prx < width) draw_layer(v, &lb, false, scbx, yb, col, prx, width, true, info, tab_b, tab_b);
     }
 
-    render_sprites(v, p2, line, width);
-
-    const uint16_t backdrop = v9990_backdrop_rgb565(v);
-    for (unsigned i = 0; i < width; i++)
-        line_rgb[i] = line_pix[i] == TRANSPARENT ? backdrop : v->palette_rgb565[line_pix[i] & 0x3F];
+    if (sprites) draw_sprites(v, p2, line, sprites, col, info, width);
 }
 
 /* ------------------------------------------------------------------ */
@@ -221,7 +306,7 @@ static void render_pattern_mode(const v9990_t *v, bool p2, unsigned line, unsign
 static uint8_t row_even[2048] __attribute__((aligned(4)));
 static uint8_t row_odd[2048] __attribute__((aligned(4)));
 
-static void fetch_row(const v9990_t *v, uint32_t row_start, uint32_t row_bytes) {
+V9990_HOT static void fetch_row(const v9990_t *v, uint32_t row_start, uint32_t row_bytes) {
     /* row_start is a multiple of row_bytes (>= 64), so both halves are
      * contiguous and word aligned in physical VRAM */
     uint32_t half = row_bytes / 2u, phys = (row_start & V9990_VRAM_MASK) >> 1;
@@ -230,7 +315,7 @@ static void fetch_row(const v9990_t *v, uint32_t row_start, uint32_t row_bytes) 
         v->vram_fetch(v, phys | 0x40000u, row_odd, half);
     } else {
         memcpy(row_even, v->vram + phys, half);
-        memcpy(row_odd, v->vram + (phys | 0x40000u), half);
+        memcpy(row_odd, v->vram1 + phys, half);
     }
 }
 
@@ -244,7 +329,7 @@ static bool bd8_lut_ready;
 /* Byte-per-pixel modes (BP6, BD8): the bytes of x and x + 1 (x even) are
  * row_even[x / 2] and row_odd[x / 2], so pixels are decoded in pairs, and
  * where the row does not wrap, four pairs per 32-bit load. */
-static uint16_t *decode_bytes(uint16_t *dst, const uint16_t *lut, uint32_t mask,
+V9990_HOT static uint16_t *decode_bytes(uint16_t *dst, const uint16_t *lut, uint32_t mask,
                               unsigned scx, unsigned iw, unsigned src_w) {
     const unsigned hmask = iw / 2u - 1u;
     unsigned x = scx & (iw - 1u), i = 0;
@@ -291,7 +376,7 @@ static uint16_t *decode_bytes(uint16_t *dst, const uint16_t *lut, uint32_t mask,
  * CC = 0 takes the bitmap colour, otherwise palette R#28 * 4 + CC; EOR
  * complements the colour. The cursor shows 1 line (2 when interlaced)
  * below its Y. Coordinates are display dots of the current mode. */
-static void draw_cursors(const v9990_t *v, unsigned line, uint16_t *px, unsigned w) {
+V9990_HOT static void draw_cursors(const v9990_t *v, unsigned line, uint16_t *px, unsigned w) {
     if (v->regs[V9990_R_CONTROL] & V9990_R8_SPD) return;
     const unsigned delay = (v->regs[V9990_R_SCREEN_MODE1] & V9990_R7_IL) ? 2u : 1u;
     unsigned x0 = 0;
@@ -325,7 +410,7 @@ static void draw_cursors(const v9990_t *v, unsigned line, uint16_t *px, unsigned
     }
 }
 
-static void render_bitmap(const v9990_t *v, unsigned line,
+V9990_HOT static void render_bitmap(const v9990_t *v, unsigned line,
                           uint16_t *out, unsigned dst_w, unsigned src_w) {
     const unsigned bpp = v9990_bpp(v);
     const unsigned iw = v9990_image_width(v);
@@ -386,7 +471,7 @@ static void render_bitmap(const v9990_t *v, unsigned line,
     if (px == out) {
         /* decoded in place */
     } else if (dst_w == src_w) {
-        memcpy(out, src_px, src_w * sizeof(uint16_t));
+        for (unsigned i = 0; i < src_w; i++) out[i] = src_px[i];
     } else if (dst_w == 2u * src_w) {
         for (unsigned i = 0; i < src_w; i++) out[2u * i] = out[2u * i + 1u] = src_px[i];
     } else {
@@ -413,8 +498,13 @@ V9990_HOT void v9990_render_line(const v9990_t *v, unsigned line,
 
     fill(out, left, backdrop);
     if (mode == V9990_MODE_P1 || mode == V9990_MODE_P2) {
-        render_pattern_mode(v, mode == V9990_MODE_P2, line, src_w);
-        scale_copy(line_rgb, src_w, out + left, dst_w);
+        render_pattern_mode(v, mode == V9990_MODE_P2, line, line_rgb, src_w);
+        if (dst_w == 2u * src_w && !(((uintptr_t)(out + left)) & 3u)) {
+            uint32_t *o = (uint32_t *)(out + left);
+            for (unsigned i = 0; i < src_w; i++) o[i] = line_rgb[i] * 0x10001u;
+        } else {
+            scale_copy(line_rgb, src_w, out + left, dst_w);
+        }
     } else {
         render_bitmap(v, line, out + left, dst_w, src_w);
     }
