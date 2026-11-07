@@ -84,7 +84,7 @@ static bool interlaced_picture(const v9968_t *v) {
     return (v->regs[20] & 0x20) || ((v->regs[9] & 0x0C) == 0x0C);
 }
 
-unsigned v9968_display_height(const v9968_t *v) {
+V9968_HOT unsigned v9968_display_height(const v9968_t *v) {
     unsigned h = v9968_lines_per_field(v);
     return interlaced_picture(v) ? h * 2 : h;
 }
@@ -365,12 +365,12 @@ V9968_HOT uint8_t v9968_read_port(v9968_t *v, uint8_t port) {
 /* Video timing                                                        */
 /* ------------------------------------------------------------------ */
 
-void v9968_video_vblank_start(v9968_t *v) {
+V9968_HOT void v9968_video_vblank_start(v9968_t *v) {
     V9968_SET_BITS(v->video_status, V9968_S2_VR);
 }
 
 /* Start of a frame: field, blink and sprite shuffle bookkeeping. */
-void v9968_video_vblank_end(v9968_t *v) {
+V9968_HOT void v9968_video_vblank_end(v9968_t *v) {
     V9968_CLR_BITS(v->video_status, V9968_S2_VR);
     v->field ^= 1;
     if (v->field) V9968_SET_BITS(v->video_status, V9968_S2_EO);
@@ -401,7 +401,7 @@ void v9968_video_vblank_end(v9968_t *v) {
         v->shuffle_start = (uint8_t)((v->shuffle_start + 17) & 0x3F);
 }
 
-void v9968_video_line(v9968_t *v, unsigned line) {
+V9968_HOT void v9968_video_line(v9968_t *v, unsigned line) {
     unsigned field_lines = v9968_lines_per_field(v);
     if (interlaced_picture(v)) {
         if (line & 1) return;           /* both fields share one line time */

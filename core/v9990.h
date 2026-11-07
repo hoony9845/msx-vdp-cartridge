@@ -90,6 +90,11 @@ typedef struct v9990 {
      * according to openMSX); the high bytes are latched per frame. */
     volatile uint16_t line_offset_a, line_offset_b;
     uint8_t  scroll_ay_high, scroll_by_high;
+
+    /* Optional (kept by v9990_reset): copy `len` bytes of physical VRAM
+     * from `phys` to `dst`. The bitmap renderer fetches each row with it,
+     * so a platform with slow VRAM can use bulk transfers. NULL = memcpy. */
+    void (*vram_fetch)(const struct v9990 *v, uint32_t phys, uint8_t *dst, uint32_t len);
 } v9990_t;
 
 /* ---- lifecycle ---- */

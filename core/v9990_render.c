@@ -13,6 +13,8 @@
  * References: Yamaha V9990 Application Manual chapters 8 and 10, and the
  * behaviour of openMSX (src/video/v9990) where the manual is silent.
  */
+#include <stdbool.h>
+#include <string.h>
 #include "v9990.h"
 #include "v9990_vram.h"
 
@@ -214,6 +216,71 @@ static void render_pattern_mode(const v9990_t *v, bool p2, unsigned line, unsign
 /* Bitmap modes                                                        */
 /* ------------------------------------------------------------------ */
 
+/* One bitmap row, fetched in physical order: the even bytes (bank 0)
+ * then the odd bytes (bank 1). Largest row: 4096 bytes (2048 x 16bpp). */
+static uint8_t row_even[2048] __attribute__((aligned(4)));
+static uint8_t row_odd[2048] __attribute__((aligned(4)));
+
+static void fetch_row(const v9990_t *v, uint32_t row_start, uint32_t row_bytes) {
+    /* row_start is a multiple of row_bytes (>= 64), so both halves are
+     * contiguous and word aligned in physical VRAM */
+    uint32_t half = row_bytes / 2u, phys = (row_start & V9990_VRAM_MASK) >> 1;
+    if (v->vram_fetch) {
+        v->vram_fetch(v, phys, row_even, half);
+        v->vram_fetch(v, phys | 0x40000u, row_odd, half);
+    } else {
+        memcpy(row_even, v->vram + phys, half);
+        memcpy(row_odd, v->vram + (phys | 0x40000u), half);
+    }
+}
+
+/* byte at offset `off` of the fetched row */
+#define ROW_BYTE(off) (((off) & 1u) ? row_odd[(off) >> 1] : row_even[(off) >> 1])
+
+static uint16_t src_px[2048] __attribute__((aligned(4)));   /* decoded source pixels */
+static uint16_t bd8_lut[256];
+static bool bd8_lut_ready;
+
+/* Byte-per-pixel modes (BP6, BD8): the bytes of x and x + 1 (x even) are
+ * row_even[x / 2] and row_odd[x / 2], so pixels are decoded in pairs, and
+ * where the row does not wrap, four pairs per 32-bit load. */
+static uint16_t *decode_bytes(uint16_t *dst, const uint16_t *lut, uint32_t mask,
+                              unsigned scx, unsigned iw, unsigned src_w) {
+    const unsigned hmask = iw / 2u - 1u;
+    unsigned x = scx & (iw - 1u), i = 0;
+    if (x & 1u) {                               /* odd start: one pixel */
+        dst[i++] = lut[row_odd[x >> 1] & mask];
+        x = (x + 1u) & (iw - 1u);
+    }
+    unsigned h = x >> 1;
+    for (; i + 1u < src_w; i += 2u, h = (h + 1u) & hmask) {
+        if ((h & 3u) == 0 && h + 4u <= iw / 2u && i + 8u <= src_w &&
+            ((uintptr_t)(dst + i) & 3u) == 0)
+            break;                              /* aligned: go fast */
+        dst[i]      = lut[row_even[h] & mask];
+        dst[i + 1u] = lut[row_odd[h] & mask];
+    }
+    /* fast part: 8 pixels per pass while the row does not wrap */
+    while (i + 8u <= src_w && h + 4u <= iw / 2u && (h & 3u) == 0 &&
+           ((uintptr_t)(dst + i) & 3u) == 0) {
+        uint32_t e = *(const uint32_t *)&row_even[h];
+        uint32_t o = *(const uint32_t *)&row_odd[h];
+        uint32_t *d = (uint32_t *)(dst + i);
+        d[0] = lut[e & mask]         | ((uint32_t)lut[o & mask] << 16);
+        d[1] = lut[(e >> 8) & mask]  | ((uint32_t)lut[(o >> 8) & mask] << 16);
+        d[2] = lut[(e >> 16) & mask] | ((uint32_t)lut[(o >> 16) & mask] << 16);
+        d[3] = lut[(e >> 24) & mask] | ((uint32_t)lut[(o >> 24) & mask] << 16);
+        i += 8u;
+        h = (h + 4u) & hmask;
+    }
+    for (; i + 1u < src_w; i += 2u, h = (h + 1u) & hmask) {
+        dst[i]      = lut[row_even[h] & mask];
+        dst[i + 1u] = lut[row_odd[h] & mask];
+    }
+    if (i < src_w) dst[i] = lut[row_even[h] & mask];
+    return dst;
+}
+
 static void render_bitmap(const v9990_t *v, unsigned line,
                           uint16_t *out, unsigned dst_w, unsigned src_w) {
     const unsigned bpp = v9990_bpp(v);
@@ -221,46 +288,63 @@ static void render_bitmap(const v9990_t *v, unsigned line,
     const unsigned ih_mask = (V9990_VRAM_SIZE * 8u / (iw * bpp)) - 1u;
     const v9990_color_mode_t cm = v9990_color_mode(v);
     const uint8_t r13 = v->regs[V9990_R_PALETTE_CTRL];
+    const uint16_t *pal = v->palette_rgb565;
 
     unsigned scx = (v->regs[V9990_R_SCROLL_AX_HI] << 3) |
                    (v->regs[V9990_R_SCROLL_AX_LO] & 0x07u);
     unsigned y = image_y_a(v, line, ih_mask);
-    uint32_t row_bits = (uint32_t)y * iw * bpp;
+    const uint32_t row_bytes = iw * bpp / 8u;
+    fetch_row(v, (uint32_t)y * row_bytes, row_bytes);
 
-    /* 16.16 fixed point step from output pixel to source pixel */
-    uint32_t step = (uint32_t)(((uint64_t)src_w << 16) / dst_w);
-    uint32_t pos = 0;
+    const unsigned xmask = iw - 1u;
+    if (src_w > 2048u) src_w = 2048u;
+    const bool direct = dst_w == src_w;        /* no scaling: decode into out */
+    uint16_t *px = src_px;
 
-    for (unsigned i = 0; i < dst_w; i++, pos += step) {
-        unsigned x = ((pos >> 16) + scx) & (iw - 1u);
-        uint32_t bit = row_bits + (uint32_t)x * bpp;
-        uint32_t addr = bit >> 3;
-        uint16_t c;
-        switch (cm) {
-        case V9990_COLOR_BP2: {
-            /* leftmost pixel in the MSBs (manual 10.10) */
-            unsigned p = (v9990_vram_read_bx(v, addr) >> (6 - (bit & 7))) & 3;
-            c = v->palette_rgb565[((r13 & 0x0F) << 2) | p];
-            break;
+    switch (cm) {
+    case V9990_COLOR_BP2: {
+        /* leftmost pixel in the MSBs (manual 10.10) */
+        const uint16_t *p = pal + ((r13 & 0x0F) << 2);
+        for (unsigned i = 0, x = scx & xmask; i < src_w; i++, x = (x + 1u) & xmask) {
+            unsigned off = x >> 2;
+            src_px[i] = p[(ROW_BYTE(off) >> (6 - ((x & 3) << 1))) & 3];
         }
-        case V9990_COLOR_BP4: {
-            unsigned p = (v9990_vram_read_bx(v, addr) >> (4 - (bit & 7))) & 15;
-            c = v->palette_rgb565[((r13 & 0x0C) << 2) | p];
-            break;
+        break;
+    }
+    case V9990_COLOR_BP4: {
+        const uint16_t *p = pal + ((r13 & 0x0C) << 2);
+        for (unsigned i = 0, x = scx & xmask; i < src_w; i++, x = (x + 1u) & xmask) {
+            unsigned off = x >> 1;
+            src_px[i] = p[(ROW_BYTE(off) >> (4 - ((x & 1) << 2))) & 15];
         }
-        case V9990_COLOR_BP6:
-            c = v->palette_rgb565[v9990_vram_read_bx(v, addr) & 0x3F];
-            break;
-        case V9990_COLOR_BD16:
-            c = bd16_to_rgb565((uint16_t)(v9990_vram_read_bx(v, addr) |
-                                          (v9990_vram_read_bx(v, addr + 1) << 8)));
-            break;
-        case V9990_COLOR_BD8:
-        default:    /* TODO: YJK / YUV */
-            c = bd8_to_rgb565(v9990_vram_read_bx(v, addr));
-            break;
+        break;
+    }
+    case V9990_COLOR_BP6:
+        px = decode_bytes(direct ? out : src_px, pal, 0x3F, scx, iw, src_w);
+        break;
+    case V9990_COLOR_BD16:
+        /* 16bpp: low byte even (bank 0), high byte odd (bank 1) */
+        for (unsigned i = 0, x = scx & xmask; i < src_w; i++, x = (x + 1u) & xmask)
+            src_px[i] = bd16_to_rgb565((uint16_t)(row_even[x] | (row_odd[x] << 8)));
+        break;
+    case V9990_COLOR_BD8:
+    default:    /* TODO: YJK / YUV */
+        if (!bd8_lut_ready) {
+            for (unsigned c = 0; c < 256; c++) bd8_lut[c] = bd8_to_rgb565((uint8_t)c);
+            bd8_lut_ready = true;
         }
-        out[i] = c;
+        px = decode_bytes(direct ? out : src_px, bd8_lut, 0xFF, scx, iw, src_w);
+        break;
+    }
+
+    if (px == out) {
+        /* decoded in place */
+    } else if (dst_w == src_w) {
+        memcpy(out, src_px, src_w * sizeof(uint16_t));
+    } else if (dst_w == 2u * src_w) {
+        for (unsigned i = 0; i < src_w; i++) out[2u * i] = out[2u * i + 1u] = src_px[i];
+    } else {
+        scale_copy(src_px, src_w, out, dst_w);
     }
 }
 

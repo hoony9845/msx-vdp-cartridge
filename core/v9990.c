@@ -20,9 +20,11 @@ void v9990_init(v9990_t *v, uint8_t *vram) {
 void v9990_reset(v9990_t *v) {
     uint8_t *vram = v->vram;
     uint8_t sys = v->sys_ctrl;
+    void (*fetch)(const struct v9990 *, uint32_t, uint8_t *, uint32_t) = v->vram_fetch;
     memset(v, 0, sizeof(*v));
     v->vram = vram;
     v->sys_ctrl = sys;
+    v->vram_fetch = fetch;
     for (unsigned i = 0; i < V9990_PALETTE_ENTRIES; i++)
         v->palette_rgb565[i] = palette_to_rgb565(&v->palette[i]);
 }
@@ -202,7 +204,7 @@ V9990_HOT uint8_t v9990_read_port(v9990_t *v, uint8_t port) {
 /* ------------------------------------------------------------------ */
 
 /* Display mode from R#6/R#7 and the MCS bit of P#7 (manual 8.3). */
-v9990_display_mode_t v9990_display_mode(const v9990_t *v) {
+V9990_HOT v9990_display_mode_t v9990_display_mode(const v9990_t *v) {
     uint8_t r6 = v->regs[V9990_R_SCREEN_MODE0];
     uint8_t r7 = v->regs[V9990_R_SCREEN_MODE1];
     bool mcs = (v->sys_ctrl & V9990_SYS_MCS) != 0;
@@ -261,7 +263,7 @@ unsigned v9990_display_width(const v9990_t *v) {
     }
 }
 
-unsigned v9990_display_height(const v9990_t *v) {
+V9990_HOT unsigned v9990_display_height(const v9990_t *v) {
     unsigned h;
     switch (v9990_display_mode(v)) {
     case V9990_MODE_B5: return 400;
@@ -280,12 +282,12 @@ unsigned v9990_display_height(const v9990_t *v) {
 /* Video timing events                                                 */
 /* ------------------------------------------------------------------ */
 
-void v9990_video_vblank_start(v9990_t *v) {
+V9990_HOT void v9990_video_vblank_start(v9990_t *v) {
     V9990_SET_BITS(v->status, V9990_ST_VR);
     V9990_SET_BITS(v->int_flags, V9990_INT_VI);
 }
 
-void v9990_video_vblank_end(v9990_t *v) {
+V9990_HOT void v9990_video_vblank_end(v9990_t *v) {
     /* new frame: line counters restart, high scroll bytes are latched */
     v->cur_line = 0;
     v->line_offset_a = 0;
@@ -297,7 +299,7 @@ void v9990_video_vblank_end(v9990_t *v) {
         V9990_XOR_BITS(v->status, V9990_ST_EO);
 }
 
-void v9990_video_line_start(v9990_t *v, unsigned line) {
+V9990_HOT void v9990_video_line_start(v9990_t *v, unsigned line) {
     v->cur_line = (uint16_t)line;
     unsigned il = v->regs[V9990_R_INT_LINE_LO] |
                   ((v->regs[V9990_R_INT_LINE_HI] & 0x03u) << 8);
