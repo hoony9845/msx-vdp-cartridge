@@ -76,6 +76,18 @@ cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
 다른 RP2350B 보드:
 `cmake -S firmware -B build-fw -DPICO_BOARD=<board> -DV9990_PSRAM_CS_PIN=<gpio>`
 
+USB 시리얼 명령(진단용):
+
+| 명령 | 내용 |
+|---|---|
+| `stat [reset]` | core1 루프·버스 이벤트·포트별 횟수, `/INT`·`/WAIT`, V9990 레지스터, 렌더 시간, DVI 상태(클럭 실측, 늦은 IRQ, 출력 재시작). `reset`은 최대값을 지운다 |
+| `psram [sweep]` | PSRAM 쓰기/읽기 검사와 스트리밍 읽기 속도. `sweep`은 클럭 분주·RX 지연별로 검사한다 (VRAM을 지움) |
+| `vram` | VRAM 64KB 블록별 CRC32 (PC 재생 결과와 비교용) |
+| `out <포트> <값>` | V9990 포트에 직접 쓰기 (16진, MSX 없이 모드 시험) |
+
+`-DMSX_BOOT_TRACE=ON`으로 빌드하면 부팅 시 USB 터미널을 최대 60초 기다린 뒤 부팅 단계를 출력한다.
+`stat`의 출력은 렌더 루프에서 나가므로, 주기적으로 보내면 그 프레임의 화면이 깨진다.
+
 ## 진행 상황
 
 | 영역 | 상태 |
@@ -89,10 +101,11 @@ cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
 | 세로 스크롤 분할(라인 중간 SCAY 쓰기), R512/R256 롤 | ✅ (PC 테스트) |
 | 비트맵 렌더링 BP2/BP4/BP6/BD8/BD16 | ✅ (PC 테스트) |
 | 커맨드: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, PSET (비트맵 좌표계, FC/BC/WM 비트 위치 대응) | ✅ (PC 테스트) |
-| 펌웨어: PIO 버스, DVI 출력, PSRAM, 듀얼 코어 | ✅ 빌드됨, **실기 미검증** |
+| 펌웨어: PIO 버스, DVI 출력, PSRAM, 듀얼 코어 | ✅ 실기 확인 (Core2350B, Chase H.Q. 주행 화면까지) |
 | 비트맵 커서, YJK/YUV, R#16 화면 위치 조정 | ⬜ TODO |
 | 커맨드: LMCM, CMMK, BMxx, LINE, SRCH, POINT, ADVN, P1/P2 좌표계 | ⬜ TODO |
-| 커맨드 실행 시간, HR 비트, 라인 타이밍 정밀도 | ⬜ TODO |
+| HR 비트 (펌웨어: DVI 두 줄마다 토글) | ✅ 기본 |
+| 커맨드 실행 시간, 라인 타이밍 정밀도, PAL 50Hz 타이밍 | ⬜ TODO |
 | 15kHz RGB 출력 (PIO + 저항 DAC) | ⬜ 선택 사항 |
 | **V9968 + geo3d v2.0** (펌웨어 설정으로 선택): 전 화면 모드, 스프라이트 모드 1–3, 전 커맨드, 인터럽트 | ✅ (PC 테스트, RTL·참조 모델·openMSX 포크와 비교) — [docs/v9968.md](docs/v9968.md) |
 
@@ -102,22 +115,24 @@ cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
 - **Chase H.Q. V9990**(DiHalt Studio, 90초 플레이): 캡처 78장 중 76장이 일치한다. 나머지 2장도 그 시점의 VRAM은 openMSX와 같다(화면 스캔 타이밍 차이).
 - **Another World**(Edd Biddulph, 터보 R, 4분 인트로): 113장 모두 일치한다.
 펌웨어의 렌더러는 스캔보다 2–3줄 앞서 그리므로, 화면 중간의 레지스터 변경은 몇 줄 일찍 적용된다(TODO).
+새 프레임은 첫 줄 4줄 전에 시작한다(라인 카운터 리셋): 그 전에 VI 핸들러가 쓴 스크롤이 첫 줄부터 적용된다.
 
 코드의 `VERIFY` 주석은 V9990 Application Manual이나 openMSX와 아직 대조하지 않은 부분이다
 (표시 모드 표, 비트 순서, NX/NY=0의 의미 등).
 
 ## 다음 단계
 
-1. 실기 버스 검증: MSX BASIC에서 `OUT &H64,15: OUT &H63,5` / `PRINT INP(&H65)`, USB 시리얼 로그 확인
-2. DVI 출력 확인: 백드롭 색과 테스트 패턴
-3. VRAM을 PSRAM에 둔 상태에서 렌더 성능 측정 (부족하면 라인 캐시나 SRAM 배치 검토)
-4. GFX9000 소프트웨어로 호환성 테스트하면서 TODO 구현
+1. 다른 GFX9000 소프트웨어(P1/P2, 스프라이트, 커맨드 엔진)로 실기 호환성 테스트
+2. PAL(R#7 bit 3) 게임: VI를 50Hz로 낼지 결정 (HDMI 출력은 60Hz 고정)
+3. 커맨드 엔진 속도: 게임 진행 중 PSRAM 경합으로 렌더 시간이 늘어난다 (B1 평균 34us/63us)
 
 ## 알려진 위험
 
 - **같은 포트를 연속으로 빠르게 읽을 때** (R800 `INIR`): core1이 `read_table`을 갱신하기 전에 다음 읽기가 오면 이전 값이 나간다.
   대책은 `/WAIT`(GPIO28, 배선은 해 둠)이다.
-- **PSRAM 대역폭**: 비트맵 모드는 충분할 것으로 예상하지만, 패턴 모드와 블리터의 랜덤 접근은 측정이 필요하다.
+- **PSRAM 대역폭**: 렌더러는 한 줄의 VRAM을 XIP 스트리밍 DMA로 한 번에 읽는다(126MHz). B3 512×424 BD8이 줄당
+  약 29us로 한계(31.7us)에 가깝다. 패턴 모드는 아직 바이트 단위 캐시 읽기다.
+- **PSRAM 126MHz**: Core2350B 한 장에서 RX 지연 2–5가 정상(3 사용). 온도 여유는 미확인.
 - **252MHz 오버클럭 + 1.20V**: 대부분의 RP2350에서 동작한다고 알려져 있지만 개체별로 확인이 필요하다.
 
 ## 참고

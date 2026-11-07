@@ -11,6 +11,7 @@
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/structs/qmi.h"
+#include "hardware/timer.h"
 #include "hardware/vreg.h"
 #include "board_pins.h"
 #include "bus.h"
@@ -28,7 +29,7 @@ static uint8_t v9968_vram[V9968_VRAM_SIZE] __attribute__((aligned(4)));
 static dvi_vdp_t video;
 
 /* Slow the flash down before raising clk_sys (must run from RAM). */
-static void __not_in_flash_func(set_flash_divisor)(uint32_t clkdiv, uint32_t rxdelay) {
+static void __no_inline_not_in_flash_func(set_flash_divisor)(uint32_t clkdiv, uint32_t rxdelay) {
     uint32_t t = qmi_hw->m[0].timing;
     t &= ~(QMI_M0_TIMING_CLKDIV_BITS | QMI_M0_TIMING_RXDELAY_BITS);
     t |= clkdiv << QMI_M0_TIMING_CLKDIV_LSB | rxdelay << QMI_M0_TIMING_RXDELAY_LSB;
@@ -46,15 +47,31 @@ static void init_clocks(void) {
 
 /* ---- video callbacks ---- */
 
-static unsigned v9990_height(const void *v) { return v9990_display_height(v); }
-static void v9990_vbs(void *v) { v9990_video_vblank_start(v); }
-static void v9990_vbe(void *v) { v9990_video_vblank_end(v); }
-static void v9990_line(void *v, unsigned n) { v9990_video_line_start(v, n); }
+static unsigned __not_in_flash_func(v9990_height)(const void *v) { return v9990_display_height(v); }
+static void __not_in_flash_func(v9990_vbs)(void *v) { v9990_video_vblank_start(v); }
+static void __not_in_flash_func(v9990_vbe)(void *v) { v9990_video_vblank_end(v); }
+static void __not_in_flash_func(v9990_line)(void *v, unsigned n) { v9990_video_line_start(v, n); }
 
-static unsigned v9968_height(const void *v) { return v9968_display_height(v); }
-static void v9968_vbs(void *v) { v9968_video_vblank_start(v); }
-static void v9968_vbe(void *v) { v9968_video_vblank_end(v); }
-static void v9968_line(void *v, unsigned n) { v9968_video_line(v, n); }
+/* HR (P#5 bit 5): software waits for it, e.g. in a line interrupt handler
+ * with interrupts disabled, so it must toggle. Published to the bus read
+ * table at once: core1 refreshes it only once per loop pass. */
+static void __not_in_flash_func(v9990_hblank)(void *v, bool on) {
+    v9990_t *p = v;
+    if (on) V9990_SET_BITS(p->status, V9990_ST_HR);
+    else    V9990_CLR_BITS(p->status, V9990_ST_HR);
+    bus_refresh_status();
+}
+
+/* Renderer row fetch: one PSRAM burst instead of a cache miss per 8 bytes. */
+static void __not_in_flash_func(v9990_fetch)(const v9990_t *v, uint32_t phys,
+                                             uint8_t *dst, uint32_t len) {
+    psram_stream_read(dst, v->vram + phys, len);
+}
+
+static unsigned __not_in_flash_func(v9968_height)(const void *v) { return v9968_display_height(v); }
+static void __not_in_flash_func(v9968_vbs)(void *v) { v9968_video_vblank_start(v); }
+static void __not_in_flash_func(v9968_vbe)(void *v) { v9968_video_vblank_end(v); }
+static void __not_in_flash_func(v9968_line)(void *v, unsigned n) { v9968_video_line(v, n); }
 static void __not_in_flash_func(v9968_hblank)(void *v, bool on) {
     v9968_t *p = v;
     if (on) V9968_SET_BITS(p->video_status, V9968_S2_HR);
@@ -62,7 +79,7 @@ static void __not_in_flash_func(v9968_hblank)(void *v, bool on) {
 }
 
 static void __not_in_flash_func(set_border)(uint16_t bd) {
-    for (uint i = 0; i < DVI_WIDTH; i++) dvi_lines.border[i] = bd;
+    for (uint i = 0; i < DVI_WIDTH; i++) dvi_lines.border.px[i] = bd;
 }
 
 /* V9990: render lines just ahead of the DVI scan-out. */
@@ -78,12 +95,23 @@ static void __not_in_flash_func(render_loop_v9990)(void) {
             set_border(v9990_backdrop_rgb565(&v9990));
             vdp_select_poll(chip);
         }
-        int32_t cur = dvi_lines.src_line;
+        /* VDP line on screen now (negative before the picture). After the
+         * picture (bottom border) the new frame waits for the blank. */
+        int32_t pos = dvi_lines.pos, scale = (int32_t)dvi_lines.scale;
+        int32_t height = (int32_t)dvi_lines.src_height;
+        int32_t cur = pos >= height * scale ? -DVI_LINE_BUFFERS - 1
+                    : pos >= 0 ? pos / scale : -((-pos + scale - 1) / scale);
         if (next < dvi_lines.src_height &&
             (int32_t)next <= cur + (DVI_LINE_BUFFERS - 1)) {
+            if ((int32_t)next <= cur) dvi_lines.render_late++;
+            uint32_t t0 = timer_hw->timerawl;
             v9990_render_line(&v9990, next,
-                              dvi_lines.line[next & (DVI_LINE_BUFFERS - 1)],
+                              dvi_lines.line[next & (DVI_LINE_BUFFERS - 1)].px,
                               DVI_WIDTH);
+            uint32_t dt = timer_hw->timerawl - t0;
+            dvi_lines.render_lines++;
+            dvi_lines.render_us += dt;
+            if (dt > dvi_lines.render_max_us) dvi_lines.render_max_us = dt;
             next++;
         }
     }
@@ -109,17 +137,53 @@ static void __not_in_flash_func(render_loop_v9968)(void) {
         if (next < height && pos >= (int32_t)next * scale - 1 &&
             pos < (int32_t)height * scale) {
             v9968_render_line(&v9968, next,
-                              dvi_lines.line[next & (DVI_LINE_BUFFERS - 1)],
+                              dvi_lines.line[next & (DVI_LINE_BUFFERS - 1)].px,
                               DVI_WIDTH);
             next++;
         }
     }
 }
 
+/* GP27/GP28 drive /INT and /WAIT through the 74LVC07 and reset to
+ * pull-down, which asserts both: release them before anything else, so
+ * the MSX keeps running even if the VDP never starts (e.g. no PSRAM). */
+static void release_bus_outputs(void) {
+    gpio_init(PIN_INT);  gpio_put(PIN_INT, 1);  gpio_set_dir(PIN_INT, GPIO_OUT);
+    gpio_init(PIN_WAIT); gpio_put(PIN_WAIT, 1); gpio_set_dir(PIN_WAIT, GPIO_OUT);
+}
+
+/* -DMSX_BOOT_TRACE=1: wait for the USB terminal, then report each boot step. */
+#if MSX_BOOT_TRACE
+#include "pico/stdio_usb.h"
+#include "hardware/xip_cache.h"
+#if defined(WAVESHARE_CORE2350B_LED_PIN)
+#define TRACE_LED WAVESHARE_CORE2350B_LED_PIN
+#else
+#define TRACE_LED PICO_DEFAULT_LED_PIN
+#endif
+#define TRACE(...) do { printf("[boot] " __VA_ARGS__); printf("\n"); stdio_flush(); sleep_ms(50); } while (0)
+static void trace_wait_terminal(void) {
+    gpio_init(TRACE_LED);
+    gpio_set_dir(TRACE_LED, GPIO_OUT);
+    for (int i = 0; i < 600 && !stdio_usb_connected(); i++) {
+        gpio_xor_mask64(1ull << TRACE_LED);
+        sleep_ms(100);
+    }
+    gpio_put(TRACE_LED, 1);
+    sleep_ms(200);
+}
+#else
+#define TRACE(...) do { } while (0)
+static void trace_wait_terminal(void) { }
+#endif
+
 int main(void) {
+    release_bus_outputs();
     init_clocks();
     chip = vdp_select_boot();
     stdio_init_all();
+    trace_wait_terminal();
+    TRACE("chip %s, clk_sys %lu", vdp_chip_name(chip), (unsigned long)clock_get_hz(clk_sys));
 
     printf("MSX VDP emulator: %s, clk_sys %lu Hz\n", vdp_chip_name(chip),
            (unsigned long)clock_get_hz(clk_sys));
@@ -135,20 +199,48 @@ int main(void) {
         video = (dvi_vdp_t){ &v9968, v9968_height, v9968_vbs, v9968_vbe, v9968_line,
                              v9968_hblank, true };
     } else {
+        TRACE("psram_init");
         size_t psram_size = psram_init();
+        TRACE("psram %u KB, KGD %02x EID %02x", (unsigned)(psram_size / 1024),
+              psram_id_kgd, psram_id_eid);
         printf("PSRAM %u KB\n", (unsigned)(psram_size / 1024));
         if (psram_size < V9990_VRAM_SIZE) {
-            printf("PSRAM not found: halting (use 'chip v9968' for the V9968)\n");
-            for (;;) vdp_select_poll(chip);
+            /* Repeat the message: the boot banner is gone before a
+             * terminal can be opened. */
+            for (absolute_time_t t = get_absolute_time();;) {
+                if (time_reached(t)) {
+                    printf("PSRAM not found (%u KB): V9990 halted, the MSX bus is "
+                           "not answered (use the V9968)\n",
+                           (unsigned)(psram_size / 1024));
+                    t = make_timeout_time_ms(1000);
+                }
+                vdp_select_poll(chip);
+            }
         }
+        TRACE("psram test");
+#if MSX_BOOT_TRACE
+        {
+            volatile uint32_t *m = (volatile uint32_t *)PSRAM_BASE;
+            for (uint32_t i = 0; i < 4; i++) m[i * 32768] = 0xA5000000u | i;
+            xip_cache_clean_all();
+            for (uint32_t i = 0; i < 4; i++) TRACE("  [%lu] = %08lx", (unsigned long)i * 131072, (unsigned long)m[i * 32768]);
+        }
+#endif
+        TRACE("v9990_init");
         v9990_init(&v9990, PSRAM_BASE);
+        psram_stream_init();
+        v9990.vram_fetch = v9990_fetch;
+        TRACE("bus_init");
         bus_init(chip, &v9990);
         video = (dvi_vdp_t){ &v9990, v9990_height, v9990_vbs, v9990_vbe, v9990_line,
-                             NULL, false };
+                             v9990_hblank, false };
     }
+    TRACE("core1 launch");
     multicore_launch_core1(bus_core1_main);
 
+    TRACE("dvi_out_start");
     dvi_out_start(&video);
+    TRACE("render loop");
     if (chip == VDP_CHIP_V9968) render_loop_v9968();
     else                        render_loop_v9990();
 }

@@ -25,15 +25,29 @@ typedef struct {
     bool just_in_time;
 } dvi_vdp_t;
 
+/* One output line as sent to HSTX: the horizontal sync command list, then
+ * the pixels, in one DMA block (every line is a block of the same length,
+ * see dvi_out.c). */
+#define DVI_LINE_CMD_WORDS 9
+typedef struct {
+    uint32_t cmd[DVI_LINE_CMD_WORDS];   /* set by dvi_out_start() */
+    uint16_t px[DVI_WIDTH];
+} dvi_line_t;
+
 /* Scanline hand-off between the DVI IRQ and the renderer (both on core0). */
 typedef struct {
-    uint16_t line[DVI_LINE_BUFFERS][DVI_WIDTH];  /* indexed by src_line % N */
-    uint16_t border[DVI_WIDTH];                  /* backdrop-filled line */
+    dvi_line_t line[DVI_LINE_BUFFERS];  /* indexed by src_line % N */
+    dvi_line_t border;                  /* backdrop-filled line */
     volatile int32_t  src_line;     /* VDP line being scanned out, -1 outside */
     volatile int32_t  pos;          /* output line - picture top (may be < 0) */
     volatile uint32_t frame;        /* incremented at the end of each picture */
     volatile uint32_t src_height;   /* latched per frame */
     volatile uint32_t scale;        /* output lines per VDP line (1 or 2) */
+    /* renderer timing (USB serial "stat") */
+    volatile uint32_t render_lines, render_us, render_max_us;
+    volatile uint32_t render_late;  /* lines rendered after their scan-out began */
+    volatile uint32_t dma_late;     /* IRQs that found several lines sent (late IRQ) */
+    volatile uint32_t dma_restarts; /* output restarted: frame period was wrong */
 } dvi_lines_t;
 
 extern dvi_lines_t dvi_lines;
@@ -41,5 +55,8 @@ extern dvi_lines_t dvi_lines;
 /* Set up HSTX + DMA for 640x480@60 and start output. clk_hstx must be
  * 126MHz (see main.c). Must be called on the core that will take the IRQ. */
 void dvi_out_start(const dvi_vdp_t *vdp);
+
+/* USB serial "stat": clocks, HSTX and DMA state of the output. */
+void dvi_print_debug(void);
 
 #endif

@@ -3,13 +3,22 @@
  * Based on pico-examples/hstx/dvi_out_hstx_encoder, changed to RGB565 and
  * to feed VDP lines (line doubled when the picture is <= 240 lines tall).
  *
+ * Every line is one DMA block of the same length (sync commands, then
+ * pixels or padding); a control channel starts each block from a ring of
+ * line addresses that the IRQ keeps 16 lines ahead, so a late IRQ cannot
+ * desynchronise the HSTX command stream.
+ *
  * The DMA IRQ also drives the VDP's timing: vblank start/end and line
  * events, through the callbacks of dvi_vdp_t.
  */
+#include <assert.h>
 #include <string.h>
 #include "pico/stdlib.h"
+#include <stdio.h>
+#include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+#include "hardware/timer.h"
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/structs/hstx_ctrl.h"
 #include "hardware/structs/hstx_fifo.h"
@@ -53,12 +62,6 @@ static uint32_t vblank_line_vsync_off[] = {
     HSTX_CMD_NOP
 };
 
-static uint32_t vblank_line_vsync_on[] = {
-    HSTX_CMD_RAW_REPEAT | MODE_H_FRONT_PORCH, SYNC_V0_H1,
-    HSTX_CMD_RAW_REPEAT | MODE_H_SYNC_WIDTH,  SYNC_V0_H0,
-    HSTX_CMD_RAW_REPEAT | (MODE_H_BACK_PORCH + MODE_H_ACTIVE_PIXELS), SYNC_V0_H1,
-    HSTX_CMD_NOP
-};
 
 static uint32_t vactive_line[] = {
     HSTX_CMD_RAW_REPEAT | MODE_H_FRONT_PORCH, SYNC_V1_H1, HSTX_CMD_NOP,
@@ -70,10 +73,25 @@ static uint32_t vactive_line[] = {
 dvi_lines_t dvi_lines;
 
 static const dvi_vdp_t *vdp;
-static uint dma_ping, dma_pong;
-static bool dma_pong_next;
-static uint v_scanline = 2;
-static bool vactive_cmdlist_posted;
+
+/* Every output line is one DMA block of LINE_WORDS words, so the data
+ * channel's count never changes and the control channel only writes the
+ * next block's address (READ_ADDR_TRIG). Blank lines are padded with RAW
+ * data words, keeping their 800 clocks. */
+#define LINE_WORDS (DVI_LINE_CMD_WORDS + MODE_H_ACTIVE_PIXELS / 2)
+#define BLANK_RAW  (LINE_WORDS - 7)     /* explicit words in a blank line */
+static uint32_t blank_line[LINE_WORDS], vsync_line[LINE_WORDS];
+
+/* Address ring run by the control channel; the IRQ refills the used slots
+ * CB_N lines ahead, so it may be several lines late. */
+#define CB_N 16
+static uint32_t cb[CB_N] __attribute__((aligned(CB_N * 4)));
+static uint16_t cb_scan[CB_N];          /* scanline of each slot */
+static uint dma_data, dma_ctrl;
+static uint out_scan;                   /* scanline being sent */
+static uint done_slot;                  /* last slot accounted for */
+static uint32_t hstx_csr;               /* HSTX configuration, for restarts */
+static uint32_t last_frame_us;
 
 /* per-frame picture geometry */
 static uint32_t pic_top, pic_scale, pic_height;
@@ -111,61 +129,145 @@ static void __not_in_flash_func(jit_events)(int32_t rel) {
     if (next >= 0 && next < (int32_t)pic_height) vdp->line(vdp->vdp, (unsigned)next);
 }
 
-/* Returns the pixel data for output line y (0..479) and fires VDP events. */
-static const uint16_t *__not_in_flash_func(active_line)(uint32_t y) {
-    if (y == 0) latch_frame_geometry();
+/* ---- filling side: what to send for a scanline (CB_N lines ahead) ---- */
 
-    int32_t rel = (int32_t)y - (int32_t)pic_top;
-    dvi_lines.pos = rel;
-    if (vdp->just_in_time && rel >= -2 * (int32_t)pic_scale)
-        jit_events(rel);
+/* geometry used for the frame being filled; adopted by the event side when
+ * that frame starts on screen */
+static uint32_t fill_top, fill_scale, fill_height;
 
-    uint32_t end = pic_top + pic_height * pic_scale;
-    if (y < pic_top || y >= end) {
-        if (y == end) end_picture();
-        return dvi_lines.border;
-    }
-
-    uint32_t src = (uint32_t)rel / pic_scale;
-    if ((uint32_t)rel % pic_scale == 0) {
-        if (!vdp->just_in_time) {
-            if (src == 0) {
-                pic_active = true;
-                vdp->vblank_end(vdp->vdp);
-            }
-            vdp->line(vdp->vdp, src);
+static void __not_in_flash_func(fill_block)(uint slot, uint scan) {
+    const void *addr;
+    if (scan >= MODE_V_FRONT_PORCH && scan < MODE_V_FRONT_PORCH + MODE_V_SYNC_WIDTH) {
+        addr = vsync_line;
+    } else if (scan < MODE_V_BLANK_LINES) {
+        addr = blank_line;
+    } else {
+        uint32_t y = scan - MODE_V_BLANK_LINES;
+        if (y == 0) {
+            uint32_t h = vdp->height(vdp->vdp);
+            if (h > DVI_HEIGHT) h = DVI_HEIGHT;
+            fill_scale = (h <= DVI_HEIGHT / 2) ? 2 : 1;
+            fill_height = h;
+            fill_top = (DVI_HEIGHT - h * fill_scale) / 2;
         }
-        dvi_lines.src_line = (int32_t)src;
+        const dvi_line_t *l = &dvi_lines.border;
+        if (y >= fill_top && y < fill_top + fill_height * fill_scale)
+            l = &dvi_lines.line[((y - fill_top) / fill_scale) & (DVI_LINE_BUFFERS - 1)];
+        addr = l;
     }
-    return dvi_lines.line[src & (DVI_LINE_BUFFERS - 1)];
+    cb[slot] = (uint32_t)(uintptr_t)addr;
+    cb_scan[slot] = (uint16_t)scan;
 }
 
-static void __not_in_flash_func(dma_irq_handler)(void) {
-    uint ch_num = dma_pong_next ? dma_pong : dma_ping;
-    dma_channel_hw_t *ch = &dma_hw->ch[ch_num];
-    dma_hw->intr = 1u << ch_num;
-    dma_pong_next = !dma_pong_next;
+/* ---- event side: VDP timing for the scanline now on screen ---- */
 
-    if (v_scanline >= MODE_V_FRONT_PORCH &&
-        v_scanline < MODE_V_FRONT_PORCH + MODE_V_SYNC_WIDTH) {
-        ch->read_addr = (uintptr_t)vblank_line_vsync_on;
-        ch->transfer_count = count_of(vblank_line_vsync_on);
-    } else if (v_scanline < MODE_V_BLANK_LINES) {
-        if (v_scanline == 0) end_picture();
-        ch->read_addr = (uintptr_t)vblank_line_vsync_off;
-        ch->transfer_count = count_of(vblank_line_vsync_off);
-    } else if (!vactive_cmdlist_posted) {
-        ch->read_addr = (uintptr_t)vactive_line;
-        ch->transfer_count = count_of(vactive_line);
-        vactive_cmdlist_posted = true;
-    } else {
-        ch->read_addr = (uintptr_t)active_line(v_scanline - MODE_V_BLANK_LINES);
-        ch->transfer_count = MODE_H_ACTIVE_PIXELS / 2;   /* 2 px per word */
-        vactive_cmdlist_posted = false;
+static void __not_in_flash_func(scan_events)(uint scan) {
+    if (scan == 0) end_picture();
+    /* output line relative to the picture top, negative in the vertical
+     * blank too, so a render-ahead renderer starts a frame just before it
+     * is shown (after the vblank interrupt handler set it up) */
+    if (scan < MODE_V_BLANK_LINES)
+        dvi_lines.pos = (int32_t)scan - MODE_V_BLANK_LINES - (int32_t)fill_top;
+    /* Render-ahead VDPs: the new frame starts (line counters and scroll
+     * latches reset) before the renderer may draw its first lines, which
+     * is DVI_LINE_BUFFERS - 1 VDP lines ahead of the scan. */
+    if (!vdp->just_in_time) {
+        int32_t start = (int32_t)MODE_V_BLANK_LINES + (int32_t)fill_top -
+                        (int32_t)(DVI_LINE_BUFFERS * fill_scale);
+        if (start < 1) start = 1;
+        if ((int32_t)scan == start) {
+            pic_active = true;
+            vdp->vblank_end(vdp->vdp);
+        }
     }
+    if (scan >= MODE_V_BLANK_LINES) {
+        uint32_t y = scan - MODE_V_BLANK_LINES;
+        if (y == 0) {
+            pic_scale = fill_scale;
+            pic_height = fill_height;
+            pic_top = fill_top;
+            dvi_lines.src_height = pic_height;
+            dvi_lines.scale = pic_scale;
+        }
+        int32_t rel = (int32_t)y - (int32_t)pic_top;
+        dvi_lines.pos = rel;
+        if (vdp->just_in_time && rel >= -2 * (int32_t)pic_scale)
+            jit_events(rel);
+        uint32_t end = pic_top + pic_height * pic_scale;
+        if (y == end) end_picture();
+        if (y >= pic_top && y < end && (uint32_t)rel % pic_scale == 0) {
+            uint32_t src = (uint32_t)rel / pic_scale;
+            if (!vdp->just_in_time) vdp->line(vdp->vdp, src);
+            dvi_lines.src_line = (int32_t)src;
+        }
+    }
+    /* Render-ahead VDPs: horizontal retrace on every other output line
+     * (one VDP line = two 31kHz lines), in the vertical blank too.
+     * Just-in-time VDPs get it from jit_events(). */
+    if (!vdp->just_in_time && vdp->hblank)
+        vdp->hblank(vdp->vdp, (scan & 1u) == 0);
+}
 
-    if (!vactive_cmdlist_posted)
-        v_scanline = (v_scanline + 1) % MODE_V_TOTAL_LINES;
+static void dvi_restart(void);
+
+/* The data channel finished a block. Find the block now running from the
+ * control channel's read pointer (several may have finished since the last
+ * IRQ), fire the events of the lines passed and refill the used slots. */
+static void __not_in_flash_func(dma_irq_handler)(void) {
+    dma_hw->ints0 = 1u << dma_data;
+    uint32_t next = (uint32_t)((dma_hw->ch[dma_ctrl].read_addr - (uintptr_t)cb) / 4u) % CB_N;
+    uint cur = (next + CB_N - 1u) % CB_N;   /* slot being sent */
+    uint passed = (cur + CB_N - done_slot) % CB_N;
+    if (passed == 0) return;
+    if (passed > 1) dvi_lines.dma_late++;   /* the IRQ was late */
+
+    uint scan_now = cb_scan[cur];
+    uint scan = out_scan;
+    for (uint i = 0; i < passed && scan != scan_now; i++) {
+        scan = (scan + 1u) % MODE_V_TOTAL_LINES;
+        if (scan == 0) {
+            /* a frame is 16.68ms; far off means HSTX lost its place in
+             * the command stream: start the output over */
+            uint32_t now = timer_hw->timerawl, dt = now - last_frame_us;
+            last_frame_us = now;
+            if (dt < 15000u || dt > 18500u) {
+                if (dvi_lines.frame > 2) { dvi_restart(); return; }
+            }
+        }
+        scan_events(scan);
+    }
+    out_scan = scan_now;
+
+    /* refill every slot except the running one and the one loaded next:
+     * slot cur + k carries scanline scan_now + k */
+    for (uint k = 2; k < CB_N; k++) {
+        uint slot = (cur + k) % CB_N;
+        uint want = (scan_now + k) % MODE_V_TOTAL_LINES;
+        if (cb_scan[slot] != want) fill_block(slot, want);
+    }
+    done_slot = cur;
+}
+
+/* (Re)start the output at scanline 0 with a fresh ring. */
+static void __not_in_flash_func(dvi_begin)(void) {
+    for (uint i = 0; i < CB_N; i++) fill_block(i, i);
+    out_scan = 0;
+    done_slot = 0;
+    last_frame_us = timer_hw->timerawl;
+    dma_hw->ch[dma_ctrl].read_addr = (uintptr_t)cb;
+    dma_hw->ch[dma_ctrl].transfer_count = 1;
+    dma_channel_start(dma_ctrl);
+}
+
+static void __not_in_flash_func(dvi_restart)(void) {
+    dvi_lines.dma_restarts++;
+    for (uint i = 0; i < CB_N; i++) cb[i] = 0;  /* null trigger: the chain stops */
+    while (dma_channel_is_busy(dma_data) || dma_channel_is_busy(dma_ctrl)) tight_loop_contents();
+    dma_hw->ints0 = 1u << dma_data;
+    hstx_ctrl_hw->csr = 0;                      /* reset the command expander */
+    for (volatile int i = 0; i < 100; i++) {}
+    hstx_ctrl_hw->csr = hstx_csr;
+    dvi_begin();
 }
 
 static void assign_pair(uint pin, uint32_t sel) {
@@ -175,6 +277,10 @@ static void assign_pair(uint pin, uint32_t sel) {
 }
 
 void dvi_out_start(const dvi_vdp_t *v) {
+    static_assert(count_of(vactive_line) == DVI_LINE_CMD_WORDS, "line command list size");
+    for (uint i = 0; i < DVI_LINE_BUFFERS; i++)
+        memcpy(dvi_lines.line[i].cmd, vactive_line, sizeof vactive_line);
+    memcpy(dvi_lines.border.cmd, vactive_line, sizeof vactive_line);
     vdp = v;
     dvi_lines.src_line = -1;
     latch_frame_geometry();
@@ -212,22 +318,41 @@ void dvi_out_start(const dvi_vdp_t *v) {
     for (uint pin = 12; pin <= 19; pin++)
         gpio_set_function(pin, GPIO_FUNC_HSTX);
 
-    dma_ping = (uint)dma_claim_unused_channel(true);
-    dma_pong = (uint)dma_claim_unused_channel(true);
+    /* blank lines: front porch, sync, then BLANK_RAW explicit words and a
+     * repeat for the rest: LINE_WORDS words, 800 clocks */
+    for (uint v = 0; v < 2; v++) {
+        uint32_t *l = v ? vsync_line : blank_line;
+        uint32_t h1 = v ? SYNC_V0_H1 : SYNC_V1_H1, h0 = v ? SYNC_V0_H0 : SYNC_V1_H0;
+        uint n = 0;
+        l[n++] = HSTX_CMD_RAW_REPEAT | MODE_H_FRONT_PORCH; l[n++] = h1;
+        l[n++] = HSTX_CMD_RAW_REPEAT | MODE_H_SYNC_WIDTH;  l[n++] = h0;
+        l[n++] = HSTX_CMD_RAW | BLANK_RAW;
+        for (uint i = 0; i < BLANK_RAW; i++) l[n++] = h1;
+        l[n++] = HSTX_CMD_RAW_REPEAT | (MODE_H_BACK_PORCH + MODE_H_ACTIVE_PIXELS - BLANK_RAW);
+        l[n++] = h1;
+        (void)n;
+    }
 
-    dma_channel_config c = dma_channel_get_default_config(dma_ping);
-    channel_config_set_chain_to(&c, dma_pong);
-    channel_config_set_dreq(&c, DREQ_HSTX);
-    dma_channel_configure(dma_ping, &c, &hstx_fifo_hw->fifo, vblank_line_vsync_off,
-                          count_of(vblank_line_vsync_off), false);
-    c = dma_channel_get_default_config(dma_pong);
-    channel_config_set_chain_to(&c, dma_ping);
-    channel_config_set_dreq(&c, DREQ_HSTX);
-    dma_channel_configure(dma_pong, &c, &hstx_fifo_hw->fifo, vblank_line_vsync_off,
-                          count_of(vblank_line_vsync_off), false);
+    dma_data = (uint)dma_claim_unused_channel(true);
+    dma_ctrl = (uint)dma_claim_unused_channel(true);
 
-    dma_hw->ints0 = (1u << dma_ping) | (1u << dma_pong);
-    dma_hw->inte0 = (1u << dma_ping) | (1u << dma_pong);
+    /* data: one line to HSTX, then hand over to the control channel */
+    dma_channel_config c = dma_channel_get_default_config(dma_data);
+    channel_config_set_chain_to(&c, dma_ctrl);
+    channel_config_set_dreq(&c, DREQ_HSTX);
+    dma_channel_configure(dma_data, &c, &hstx_fifo_hw->fifo, NULL, LINE_WORDS, false);
+
+    /* control: next line address into READ_ADDR_TRIG, which starts it */
+    c = dma_channel_get_default_config(dma_ctrl);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+    channel_config_set_read_increment(&c, true);
+    channel_config_set_write_increment(&c, false);
+    channel_config_set_ring(&c, false, __builtin_ctz(CB_N * 4));  /* read ring: the table */
+    dma_channel_configure(dma_ctrl, &c, &dma_hw->ch[dma_data].al3_read_addr_trig,
+                          cb, 1, false);
+
+    dma_hw->ints0 = 1u << dma_data;
+    dma_hw->inte0 = 1u << dma_data;
     irq_set_exclusive_handler(DMA_IRQ_0, dma_irq_handler);
     irq_set_priority(DMA_IRQ_0, 0);
     irq_set_enabled(DMA_IRQ_0, true);
@@ -235,5 +360,34 @@ void dvi_out_start(const dvi_vdp_t *v) {
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS |
                             BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
 
-    dma_channel_start(dma_ping);
+    hstx_csr = hstx_ctrl_hw->csr;
+    dvi_begin();
+}
+
+/* USB serial "stat": the output state, to tell a clock change from
+ * overwritten command lists when the line timing breaks. */
+void dvi_print_debug(void) {
+    printf("dvi: clk_sys %lu kHz, clk_hstx %lu kHz (measured), hstx csr %08lx\n",
+           (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS),
+           (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_HSTX),
+           (unsigned long)hstx_ctrl_hw->csr);
+    bool ok = memcmp(dvi_lines.border.cmd, vactive_line, sizeof vactive_line) == 0;
+    for (uint i = 0; i < DVI_LINE_BUFFERS; i++)
+        ok = ok && memcmp(dvi_lines.line[i].cmd, vactive_line, sizeof vactive_line) == 0;
+    printf("dvi: line command lists %s; vsync_off %03lx %08lx %03lx %08lx %03lx %08lx\n",
+           ok ? "intact" : "OVERWRITTEN",
+           (unsigned long)vblank_line_vsync_off[0], (unsigned long)vblank_line_vsync_off[1],
+           (unsigned long)vblank_line_vsync_off[2], (unsigned long)vblank_line_vsync_off[3],
+           (unsigned long)vblank_line_vsync_off[4], (unsigned long)vblank_line_vsync_off[5]);
+    for (uint k = 0; k < 2; k++) {
+        uint c = k ? dma_ctrl : dma_data;
+        printf("dvi: dma %u ctrl %08lx count %lu read %08lx\n", c,
+               (unsigned long)dma_hw->ch[c].ctrl_trig, (unsigned long)dma_hw->ch[c].transfer_count,
+               (unsigned long)dma_hw->ch[c].read_addr);
+    }
+    if (!ok) {
+        printf("dvi: line0 cmd:");
+        for (uint i = 0; i < DVI_LINE_CMD_WORDS; i++) printf(" %08lx", (unsigned long)dvi_lines.line[0].cmd[i]);
+        printf("\n");
+    }
 }

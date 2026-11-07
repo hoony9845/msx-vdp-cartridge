@@ -40,6 +40,12 @@ if(V9990_PSRAM_CS_PIN)
     target_compile_definitions(msx_v9990 PRIVATE V9990_PSRAM_CS_PIN=${V9990_PSRAM_CS_PIN})
 endif()
 
+# Boot trace: wait for the USB terminal, then print each boot step
+option(MSX_BOOT_TRACE "Wait for USB serial and trace the boot steps" OFF)
+if(MSX_BOOT_TRACE)
+    target_compile_definitions(msx_v9990 PRIVATE MSX_BOOT_TRACE=1)
+endif()
+
 # VDP emulated when no choice was saved in flash (USB serial: chip v9990|v9968)
 set(MSX_VDP_DEFAULT "V9990" CACHE STRING "Default VDP: V9990 or V9968")
 set_property(CACHE MSX_VDP_DEFAULT PROPERTY STRINGS V9990 V9968)

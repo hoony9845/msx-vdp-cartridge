@@ -17,6 +17,7 @@
  * (R800 INIR on P#0), assert /WAIT from the read SM until core1 is done.
  */
 #include <assert.h>
+#include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
@@ -24,6 +25,7 @@
 #include "board_pins.h"
 #include "bus.h"
 #include "bus.pio.h"
+#include "dvi_out.h"
 
 static_assert(PIN_CS == v9990_bus_monitor_PIN_CS, "bus.pio PIN_CS mismatch");
 static_assert(PIN_CS == v9990_bus_read_PIN_CS, "bus.pio PIN_CS mismatch");
@@ -35,9 +37,24 @@ static_assert(PIN_D0 == PIN_A0 + 4, "data bus must follow A0-A3");
 #define V9968_BLOCK 8u                          /* V9968 ports at nibble 8-F */
 #define V9968_CLK_PER_US 86u                    /* command engine: 85.9MHz */
 #define V9968_SLICE 512u                        /* max clocks per loop pass */
+#define V9990_CMD_SLICE 4u                      /* command engine units per loop pass */
 
 static uint32_t ring[RING_WORDS] __attribute__((aligned(1u << RING_BITS)));
 static volatile uint32_t read_table[16] __attribute__((aligned(64)));
+
+/* Diagnostics, written by core1 and read by bus_print_stats() on core0. */
+static volatile struct {
+    uint32_t loops;            /* core1 heartbeat */
+    uint32_t events;
+    uint32_t max_backlog;      /* ring words waiting at once (overrun at RING_WORDS) */
+    uint32_t max_loop_us;      /* longest core1 loop pass */
+    uint32_t writes[16], reads[16];
+    uint32_t last_ev[8];       /* last events, newest at last_pos - 1 */
+    uint32_t last_pos;
+    uint32_t resets;
+    uint32_t fault_pc, fault_lr, fault_core;
+    uint32_t cmd_us, cmd_slices;   /* time in the command engine while busy */
+} stats;
 
 static vdp_chip_t chip;
 static v9990_t *v9990;
@@ -156,19 +173,46 @@ void bus_init(vdp_chip_t c, void *vdp) {
     pio_set_sm_mask_enabled(bus_pio, (1u << sm_monitor) | (1u << sm_read), true);
 }
 
+void __not_in_flash_func(bus_refresh_status)(void) {
+    if (chip == VDP_CHIP_V9990 && v9990)
+        read_table[V9990_PORT_STATUS] = v9990_peek_port(v9990, V9990_PORT_STATUS);
+}
+
 static inline uint32_t __not_in_flash_func(ring_head)(void) {
     return ((dma_hw->ch[dma_ring].write_addr - (uintptr_t)ring) / 4u) & (RING_WORDS - 1u);
+}
+
+static inline void __not_in_flash_func(stat_event)(uint32_t ev) {
+    uint8_t port = (ev >> 1) & 0x0F;
+    stats.events++;
+    if (ev & 1u) stats.reads[port]++;
+    else         stats.writes[port]++;
+    stats.last_ev[stats.last_pos & 7u] = ev;
+    stats.last_pos++;
+}
+
+static inline void __not_in_flash_func(stat_loop)(uint32_t head, uint32_t tail,
+                                                  uint32_t *t0) {
+    uint32_t backlog = (head - tail) & (RING_WORDS - 1u);
+    if (backlog > stats.max_backlog) stats.max_backlog = backlog;
+    uint32_t now = timer_hw->timerawl;
+    if (now - *t0 > stats.max_loop_us) stats.max_loop_us = now - *t0;
+    *t0 = now;
+    stats.loops++;
 }
 
 static void __not_in_flash_func(loop_v9990)(void) {
     uint32_t tail = 0;
     bool in_reset = false;
+    uint32_t t0 = timer_hw->timerawl;
 
     for (;;) {
         uint32_t head = ring_head();
+        stat_loop(head, tail, &t0);
         while (tail != head) {
             uint32_t ev = ring[tail];
             tail = (tail + 1u) & (RING_WORDS - 1u);
+            stat_event(ev);
             uint8_t port = (ev >> 1) & 0x0F;
             if (port < 8) {
                 if (ev & 1u)
@@ -176,11 +220,20 @@ static void __not_in_flash_func(loop_v9990)(void) {
                 else
                     v9990_write_port(v9990, port, (uint8_t)(ev >> 5));
                 refresh_v9990();
+                /* An interrupt handler returns a few us after it clears
+                 * P#6: release /INT now, or the Z80 takes it again. */
+                gpio_put(PIN_INT, !v9990_irq_pending(v9990));
             }
         }
 
-        if (v9990_cmd_step(v9990, 16))
-            refresh_v9990();
+        /* small slices: bus events wait for the current slice to end */
+        if (v9990->cmd.op) {
+            uint32_t c0 = timer_hw->timerawl;
+            if (v9990_cmd_step(v9990, V9990_CMD_SLICE))
+                refresh_v9990();
+            stats.cmd_us += timer_hw->timerawl - c0;
+            stats.cmd_slices++;
+        }
         read_table[V9990_PORT_STATUS] = v9990_peek_port(v9990, V9990_PORT_STATUS);
         read_table[V9990_PORT_INT_FLAG] = v9990_peek_port(v9990, V9990_PORT_INT_FLAG);
 
@@ -188,6 +241,7 @@ static void __not_in_flash_func(loop_v9990)(void) {
 
         bool reset = !gpio_get(PIN_RESET);
         if (reset && !in_reset) {
+            stats.resets++;
             v9990_reset(v9990);
             refresh_v9990();
         }
@@ -200,12 +254,15 @@ static void __not_in_flash_func(loop_v9968)(void) {
     bool in_reset = false;
     uint32_t last_us = timer_hw->timerawl;
     int32_t credit = 0;                 /* command engine clocks owed */
+    uint32_t t0 = last_us;
 
     for (;;) {
         uint32_t head = ring_head();
+        stat_loop(head, tail, &t0);
         while (tail != head) {
             uint32_t ev = ring[tail];
             tail = (tail + 1u) & (RING_WORDS - 1u);
+            stat_event(ev);
             uint8_t port = (ev >> 1) & 0x0F;
             if (port >= V9968_BLOCK) {
                 if (ev & 1u)
@@ -234,6 +291,7 @@ static void __not_in_flash_func(loop_v9968)(void) {
 
         bool reset = !gpio_get(PIN_RESET);
         if (reset && !in_reset) {
+            stats.resets++;
             v9968_reset(v9968);
             refresh_v9968();
         }
@@ -244,4 +302,127 @@ static void __not_in_flash_func(loop_v9968)(void) {
 void __not_in_flash_func(bus_core1_main)(void) {
     if (chip == VDP_CHIP_V9968) loop_v9968();
     else                        loop_v9990();
+}
+
+/* Hard fault: record where, then stop this core (the other one keeps
+ * serving USB so "stat" can report it). */
+void __attribute__((used)) bus_fault_record(uint32_t *frame) {
+    stats.fault_pc = frame[6];
+    stats.fault_lr = frame[5];
+    stats.fault_core = get_core_num() + 1u;
+    gpio_put(PIN_INT, 1);
+    gpio_put(PIN_WAIT, 1);
+    for (;;) __asm volatile("wfi");
+}
+
+void __attribute__((naked)) isr_hardfault(void) {
+    __asm volatile(
+        "tst lr, #4\n"
+        "ite eq\n"
+        "mrseq r0, msp\n"
+        "mrsne r0, psp\n"
+        "b bus_fault_record\n");
+}
+
+void bus_print_stats(bool reset) {
+    static uint32_t prev_loops, prev_us;
+    uint32_t now = timer_hw->timerawl;
+    uint32_t loops = stats.loops;
+    printf("core1: %lu loops (%lu/ms since last stat), max pass %lu us, "
+           "max backlog %lu/%u, MSX resets %lu\n",
+           (unsigned long)loops,
+           (unsigned long)((loops - prev_loops) / ((now - prev_us) / 1000u + 1u)),
+           (unsigned long)stats.max_loop_us, (unsigned long)stats.max_backlog,
+           (unsigned)RING_WORDS, (unsigned long)stats.resets);
+    prev_loops = loops;
+    prev_us = now;
+    if (stats.fault_core)
+        printf("HARD FAULT on core%lu: pc %08lx lr %08lx\n",
+               (unsigned long)stats.fault_core - 1u,
+               (unsigned long)stats.fault_pc, (unsigned long)stats.fault_lr);
+    printf("events %lu; port w/r:", (unsigned long)stats.events);
+    for (uint p = 0; p < 16; p++)
+        if (stats.writes[p] || stats.reads[p])
+            printf(" %X:%lu/%lu", p, (unsigned long)stats.writes[p],
+                   (unsigned long)stats.reads[p]);
+    printf("\nlast events (old->new):");
+    uint32_t pos = stats.last_pos;
+    for (uint i = 0; i < 8; i++) {
+        uint32_t ev = stats.last_ev[(pos + i) & 7u];
+        printf(" %c%X=%02X", (ev & 1u) ? 'R' : 'W', (unsigned)((ev >> 1) & 0x0F),
+               (unsigned)((ev >> 5) & 0xFF));
+    }
+    printf("\n/INT pin %s, /WAIT pin %s, /RESET %s\n",
+           gpio_get_out_level(PIN_INT) ? "released" : "ASSERTED",
+           gpio_get_out_level(PIN_WAIT) ? "released" : "ASSERTED",
+           gpio_get(PIN_RESET) ? "high" : "LOW");
+    if (chip == VDP_CHIP_V9990 && v9990) {
+        const v9990_t *v = v9990;
+        printf("V9990: status %02X int_flags %02X int_enable(R9) %02X irq %d, "
+               "cmd op %X remaining %u x %u, P#7 %02X\n",
+               v->status, v->int_flags, v->regs[V9990_R_INT_ENABLE],
+               v9990_irq_pending(v), v->cmd.op, v->cmd.remaining_x, v->cmd.remaining_y,
+               v->sys_ctrl);
+        printf("regs:");
+        for (uint r = 0; r < 64; r++) printf("%s%02X", (r & 15) ? " " : "\n ", v->regs[r]);
+        printf("\nread_table:");
+        for (uint p = 0; p < 8; p++) printf(" %02lX", (unsigned long)read_table[p] & 0xFF);
+        printf("\n");
+    }
+    static uint32_t prev_frame, prev_frame_us;
+    uint32_t fr = dvi_lines.frame;
+    printf("frames %lu in %lu ms; command engine busy %lu us (%lu slices of %u)\n",
+           (unsigned long)(fr - prev_frame), (unsigned long)((now - prev_frame_us) / 1000u),
+           (unsigned long)stats.cmd_us, (unsigned long)stats.cmd_slices,
+           (unsigned)V9990_CMD_SLICE);
+    printf("dvi: late IRQs %lu, output restarts %lu\n",
+           (unsigned long)dvi_lines.dma_late, (unsigned long)dvi_lines.dma_restarts);
+    dvi_print_debug();
+    prev_frame = fr;
+    prev_frame_us = now;
+    uint32_t n = dvi_lines.render_lines;
+    printf("render: %lu lines, avg %lu us, max %lu us, late %lu; picture %lu lines x%lu "
+           "(budget %lu us per line)\n",
+           (unsigned long)n, (unsigned long)(n ? dvi_lines.render_us / n : 0),
+           (unsigned long)dvi_lines.render_max_us, (unsigned long)dvi_lines.render_late,
+           (unsigned long)dvi_lines.src_height, (unsigned long)dvi_lines.scale,
+           (unsigned long)(dvi_lines.scale * 3178u / 100u));
+    if (reset) {
+        stats.cmd_us = 0;
+        stats.cmd_slices = 0;
+        dvi_lines.render_lines = 0;
+        dvi_lines.render_us = 0;
+        dvi_lines.render_max_us = 0;
+        dvi_lines.render_late = 0;
+        stats.max_loop_us = 0;
+        stats.max_backlog = 0;
+    }
+}
+
+/* USB serial "vram": CRC32 of each 64KB VRAM block, to compare with a
+ * replay of the same software on the PC (zero block = d7978eeb). */
+static uint32_t crc32_block(const volatile uint8_t *p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    while (n--) {
+        c ^= *p++;
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & -(c & 1u));
+    }
+    return ~c;
+}
+
+void bus_print_vram_crc(void) {
+    if (chip != VDP_CHIP_V9990 || !v9990) { printf("vram: V9990 only\n"); return; }
+    printf("vram crc:");
+    for (uint i = 0; i < 8; i++)
+        printf(" %08lx", (unsigned long)crc32_block(v9990->vram + i * 65536u, 65536u));
+    printf("\nall %08lx\n", (unsigned long)crc32_block(v9990->vram, V9990_VRAM_SIZE));
+}
+
+/* USB serial "out <port> <value>" (hex): a V9990 port write from core0,
+ * for testing without an MSX (not synchronised with core1). */
+void bus_debug_out(unsigned port, unsigned value) {
+    if (chip == VDP_CHIP_V9990 && v9990) {
+        v9990_write_port(v9990, (uint8_t)(port & 15u), (uint8_t)value);
+        printf("P#%X <- %02X\n", port & 15u, value & 0xFFu);
+    }
 }

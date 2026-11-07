@@ -7,6 +7,7 @@
  * nothing else runs yet.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/flash.h"
@@ -15,6 +16,8 @@
 #include "hardware/watchdog.h"
 #include "board_pins.h"
 #include "vdp_select.h"
+#include "bus.h"
+#include "psram.h"
 
 #define SETTING_OFFSET  (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define SETTING_MAGIC   0x56445053u          /* "VDPS" */
@@ -96,8 +99,27 @@ static void switch_to(vdp_chip_t chip) {
 /* "chip v9990" | "chip v9968" | "chip" (show) */
 static void command(const char *line, vdp_chip_t current) {
     while (*line == ' ') line++;
+    if (strncmp(line, "psram", 5) == 0) {
+        psram_diag(strstr(line, "sweep") != NULL);
+        return;
+    }
+    if (strncmp(line, "out ", 4) == 0) {
+        char *end;
+        unsigned long port = strtoul(line + 4, &end, 16);
+        unsigned long value = strtoul(end, &end, 16);
+        bus_debug_out((unsigned)port, (unsigned)value);
+        return;
+    }
+    if (strncmp(line, "vram", 4) == 0) {
+        bus_print_vram_crc();
+        return;
+    }
+    if (strncmp(line, "stat", 4) == 0) {
+        bus_print_stats(strstr(line, "reset") != NULL);
+        return;
+    }
     if (strncmp(line, "chip", 4) != 0) {
-        if (*line) printf("commands: chip [v9990|v9968]\n");
+        if (*line) printf("commands: chip [v9990|v9968], stat [reset], psram [sweep], vram, out <port> <val>\n");
         return;
     }
     line += 4;
