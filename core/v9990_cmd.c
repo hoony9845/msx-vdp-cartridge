@@ -1,8 +1,9 @@
 /*
  * Command engine (blitter).
  *
- * Implemented: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, PSET (bitmap coordinates).
- * TODO: LMCM, CMMK, BMXL, BMLX, BMLL, LINE, SRCH, POINT, ADVN,
+ * Implemented: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, LINE, PSET (bitmap
+ * coordinates).
+ * TODO: LMCM, CMMK, BMXL, BMLX, BMLL, SRCH, POINT, ADVN,
  *       P1/P2 coordinate systems (not fully known, see openMSX), realistic
  *       execution timing.
  *
@@ -168,6 +169,15 @@ void v9990_cmd_start(v9990_t *v) {
                        ((v->regs[V9990_R_CMD_SY1] & 0x07u) << 16)) & V9990_VRAM_MASK;
         c->bits_left = 0;
         break;
+    case V9990_CMD_LINE:
+        /* As openMSX: NX dots along the major axis (ARG MAJ: 0 = X), NY the
+         * minor length; raw 12-bit counts, the end is drawn too. State:
+         * x = X position, y = DY, src_x = error term, src_y = dots drawn. */
+        c->nx = reg16(v, V9990_R_CMD_NX0) & 0x0FFF;
+        c->ny = reg16(v, V9990_R_CMD_NY0) & 0x0FFF;
+        c->src_x = (uint16_t)((uint16_t)(c->nx - 1u) / 2u);
+        c->src_y = 0;
+        break;
     case V9990_CMD_PSET:
         write_fc_bc(v, c->dx, c->dy, true);
         finish(v);
@@ -194,6 +204,33 @@ V9990_HOT bool v9990_cmd_step(v9990_t *v, unsigned budget) {
         while (budget--) {
             write_fc_bc(v, v->cmd.x, v->cmd.y, true);
             if (!advance_rect(v)) {
+                finish(v);
+                return false;
+            }
+        }
+    }
+    if (v->cmd.op == V9990_CMD_LINE) {
+        v9990_cmd_state_t *c = &v->cmd;
+        const uint8_t arg = v->regs[V9990_R_CMD_ARG];
+        const uint16_t tx = (arg & V9990_ARG_DIX) ? 0xFFFFu : 1u;
+        const uint16_t ty = (arg & V9990_ARG_DIY) ? 0xFFFFu : 1u;
+        const bool y_major = (arg & V9990_ARG_MAJ) != 0;
+        const unsigned width = v9990_image_width(v);
+        while (budget--) {
+            write_fc_bc(v, c->x, c->y, true);
+            if (y_major) c->y = (uint16_t)(c->y + ty);
+            else         c->x = (uint16_t)(c->x + tx);
+            if (c->src_x < c->ny) {
+                c->src_x = (uint16_t)(c->src_x + c->nx);
+                if (y_major) c->x = (uint16_t)(c->x + tx);
+                else         c->y = (uint16_t)(c->y + ty);
+            }
+            c->src_x = (uint16_t)(c->src_x - c->ny);
+            /* ends after NX + 1 dots, or when X leaves the image */
+            if (c->src_y++ == c->nx || (c->x & width)) {
+                /* DY keeps the last position (openMSX) */
+                v->regs[V9990_R_CMD_DY0] = (uint8_t)c->y;
+                v->regs[V9990_R_CMD_DY1] = (uint8_t)((c->y >> 8) & 0x0F);
                 finish(v);
                 return false;
             }

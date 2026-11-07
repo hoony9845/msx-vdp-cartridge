@@ -281,6 +281,50 @@ static uint16_t *decode_bytes(uint16_t *dst, const uint16_t *lut, uint32_t mask,
     return dst;
 }
 
+/* ------------------------------------------------------------------ */
+/* Bitmap cursors (two 32x32 1bpp, after openMSX's tests on a GFX9000)   */
+/* ------------------------------------------------------------------ */
+
+/* Attributes at 0x7FE00 / 0x7FE08 (Y lo, Y hi bit 0, X lo, attr: X hi in
+ * bits 1-0, disable bit 4, EOR bit 5, CC1-CC0 bits 7-6), patterns at
+ * 0x7FF00 / 0x7FF80 (4 bytes per line, MSB = left). Cursor 0 is in front.
+ * CC = 0 takes the bitmap colour, otherwise palette R#28 * 4 + CC; EOR
+ * complements the colour. The cursor shows 1 line (2 when interlaced)
+ * below its Y. Coordinates are display dots of the current mode. */
+static void draw_cursors(const v9990_t *v, unsigned line, uint16_t *px, unsigned w) {
+    if (v->regs[V9990_R_CONTROL] & V9990_R8_SPD) return;
+    const unsigned delay = (v->regs[V9990_R_SCREEN_MODE1] & V9990_R7_IL) ? 2u : 1u;
+    unsigned x0 = 0;
+    uint32_t pattern0 = 0;                      /* dots taken by cursor 0 */
+    for (unsigned n = 0; n < 2; n++) {
+        uint32_t attr_addr = 0x7FE00u + 8u * n;
+        uint8_t attr = v9990_vram_read_bx(v, attr_addr + 6);
+        if ((attr & 0x10) || (attr & 0xE0) == 0) continue;     /* off, or invisible */
+        unsigned y = v9990_vram_read_bx(v, attr_addr) +
+                     (v9990_vram_read_bx(v, attr_addr + 2) & 1u) * 256u + delay;
+        unsigned row = (line - y) & 511u;
+        if (row >= 32) continue;
+        uint32_t pat_addr = 0x7FF00u + 0x80u * n + 4u * row;
+        uint32_t pattern = ((uint32_t)v9990_vram_read_bx(v, pat_addr) << 24) |
+                           ((uint32_t)v9990_vram_read_bx(v, pat_addr + 1) << 16) |
+                           ((uint32_t)v9990_vram_read_bx(v, pat_addr + 2) << 8) |
+                           v9990_vram_read_bx(v, pat_addr + 3);
+        if (!pattern) continue;
+        unsigned x = v9990_vram_read_bx(v, attr_addr + 4) + (attr & 3u) * 256u;
+        bool eor_only = (attr & 0xE0) == 0x20;  /* CC = 0: complement the bitmap */
+        uint16_t color = v->palette_rgb565[((v->regs[V9990_R_SPRITE_PAL_CTRL] << 2) +
+                                            (attr >> 6)) & 0x3F];
+        if (attr & 0x20) color ^= 0xFFFF;
+        for (unsigned i = 0; i < 32 && x + i < w; i++) {
+            if (!(pattern & (0x80000000u >> i))) continue;
+            unsigned d = x + i - x0;            /* cursor 0 is in front */
+            if (n == 1 && x + i >= x0 && d < 32 && (pattern0 & (0x80000000u >> d))) continue;
+            px[x + i] = eor_only ? (uint16_t)(px[x + i] ^ 0xFFFF) : color;
+        }
+        if (n == 0) { x0 = x; pattern0 = pattern; }
+    }
+}
+
 static void render_bitmap(const v9990_t *v, unsigned line,
                           uint16_t *out, unsigned dst_w, unsigned src_w) {
     const unsigned bpp = v9990_bpp(v);
@@ -336,6 +380,8 @@ static void render_bitmap(const v9990_t *v, unsigned line,
         px = decode_bytes(direct ? out : src_px, bd8_lut, 0xFF, scx, iw, src_w);
         break;
     }
+
+    draw_cursors(v, line, px, src_w);
 
     if (px == out) {
         /* decoded in place */

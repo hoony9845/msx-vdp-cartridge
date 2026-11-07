@@ -100,10 +100,11 @@ USB 시리얼 명령(진단용):
 | P1/P2 스프라이트: 125개, 줄당 16개, 앞/뒤 우선순위, 팔레트 | ✅ (PC 테스트) |
 | 세로 스크롤 분할(라인 중간 SCAY 쓰기), R512/R256 롤 | ✅ (PC 테스트) |
 | 비트맵 렌더링 BP2/BP4/BP6/BD8/BD16 | ✅ (PC 테스트) |
-| 커맨드: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, PSET (비트맵 좌표계, FC/BC/WM 비트 위치 대응) | ✅ (PC 테스트) |
+| 커맨드: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, LINE, PSET (비트맵 좌표계, FC/BC/WM 비트 위치 대응) | ✅ (PC 테스트) |
+| 비트맵 커서 2개 (32×32, 팔레트/EOR, 커서 0 우선) | ✅ (PC 테스트, openMSX 동작 기준) |
 | 펌웨어: PIO 버스, DVI 출력, PSRAM, 듀얼 코어 | ✅ 실기 확인 (Core2350B, Chase H.Q. 주행 화면까지) |
-| 비트맵 커서, YJK/YUV, R#16 화면 위치 조정 | ⬜ TODO |
-| 커맨드: LMCM, CMMK, BMxx, LINE, SRCH, POINT, ADVN, P1/P2 좌표계 | ⬜ TODO |
+| YJK/YUV, R#16 화면 위치 조정 | ⬜ TODO |
+| 커맨드: LMCM, CMMK, BMxx, SRCH, POINT, ADVN, P1/P2 좌표계 | ⬜ TODO |
 | HR 비트 (펌웨어: DVI 두 줄마다 토글) | ✅ 기본 |
 | 커맨드 실행 시간, 라인 타이밍 정밀도, PAL 50Hz 타이밍 | ⬜ TODO |
 | 15kHz RGB 출력 (PIO + 저항 DAC) | ⬜ 선택 사항 |
@@ -114,6 +115,12 @@ USB 시리얼 명령(진단용):
 실제 게임에서는 다음과 같다.
 - **Chase H.Q. V9990**(DiHalt Studio, 90초 플레이): 캡처 78장 중 76장이 일치한다. 나머지 2장도 그 시점의 VRAM은 openMSX와 같다(화면 스캔 타이밍 차이).
 - **Another World**(Edd Biddulph, 터보 R, 4분 인트로): 113장 모두 일치한다.
+- MSXdev/Mapax 작품(openMSX 60초 자동 입력, 전원 직후 화면 제외):
+  - **Attack of the Petscii Robots**(P1, 스프라이트): 33장 모두 일치.
+  - **MSX in a Row**(B3 BD16, LMMC, 비트맵 커서): 21장 일치, 11장은 0.1% 미만(커서 아래 끝 1줄, 미확인).
+  - **Dreams Puzzle**(B3 BD16, LINE), **Mr. Balloon remake**(B7 1024 BP4): VRAM이 26/30 시점에서 같고,
+    나머지는 직전 프레임에 시작된 커맨드 영역뿐이다(openMSX는 커맨드에 시간이 걸림). B7 화면은 openMSX
+    캡처가 640픽셀로 줄어 도트 비교를 할 수 없다.
 펌웨어의 렌더러는 스캔보다 2–3줄 앞서 그리므로, 화면 중간의 레지스터 변경은 몇 줄 일찍 적용된다(TODO).
 새 프레임은 첫 줄 4줄 전에 시작한다(라인 카운터 리셋): 그 전에 VI 핸들러가 쓴 스크롤이 첫 줄부터 적용된다.
 
