@@ -15,6 +15,7 @@ static inline uint8_t expand3(uint8_t c) { return (uint8_t)((c << 2) | (c >> 1))
 
 static void set_palette(v9968_t *v, unsigned i, unsigned r, unsigned g, unsigned b) {
     v->palette[i] = (uint16_t)((r << 10) | (g << 5) | b);
+    v->pal_gen++;
 }
 
 void v9968_init(v9968_t *v, uint8_t *vram) {
@@ -28,9 +29,11 @@ void v9968_init(v9968_t *v, uint8_t *vram) {
 void v9968_reset(v9968_t *v) {
     uint8_t *vram = v->vram;
     bool gamma = v->gamma, rtl_lmcm = v->cmd.rtl_lmcm;
+    uint32_t pal_gen = v->pal_gen;      /* keeps counting: renderer caches */
     memset(v, 0, sizeof(*v));
     v->vram = vram;
     v->gamma = gamma;
+    v->pal_gen = pal_gen + 1u;
     v->cmd.rtl_lmcm = rtl_lmcm;
     v->regs[8] = 0x08;          /* VR = 1 (64K-bit DRAM type) */
     v->regs[21] = 0x01;         /* V58: V9958 compatible */

@@ -442,6 +442,7 @@ static void test_sprites_mode3(void) {
     vdp.palette[0x10 | 3] = (31 << 10);
     vdp.palette[0x10 | 2] = (31 << 5);
     vdp.palette[0x10 | 1] = 31;
+    vdp.pal_gen++;                  /* written behind the ports' back */
     v9968_render_line(&vdp, 10, line, 640);
     /* RVX: dot 0 of the source is shown at the right end */
     CHECK_EQ(line[64 + 2 * 40], c565(0, 0, 31));
@@ -454,6 +455,7 @@ static void test_sprites_mode3(void) {
     /* 50% transparency over a red background */
     vram[10 * 128 + 20] = 0x33;
     vdp.palette[3] = (31 << 10);
+    vdp.pal_gen++;
     vram[sat + 3] = 0x80 | 0x10 | 0x01;
     v9968_render_line(&vdp, 10, line, 640);
     CHECK_EQ(line[64 + 2 * 40], c565(15, 0, 15));

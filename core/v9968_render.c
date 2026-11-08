@@ -20,15 +20,27 @@
 
 #define LINE_MAX 512
 
+/* Optional stage timing (the firmware defines V9968_PROF and the clock):
+ * 0 background, 1 colours, 2 sprites, 3 output. */
+#ifdef V9968_PROF
+uint32_t v9968_prof_now(void);
+volatile uint32_t v9968_prof_us[4];
+#define PROF_MARK(i) do { uint32_t t_ = v9968_prof_now(); v9968_prof_us[i] += t_ - prof_t; prof_t = t_; } while (0)
+#define PROF_START() uint32_t prof_t = v9968_prof_now()
+#else
+#define PROF_MARK(i) do { } while (0)
+#define PROF_START() do { } while (0)
+#endif
+
 static uint16_t line_c15[LINE_MAX];       /* composed line, 0RRRRRGGGGGBBBBB */
 static uint8_t  bg_idx[LINE_MAX];         /* palette modes: palette index */
-static uint8_t  bg_zero[LINE_MAX];        /* pixel value was 0 (transparent) */
 
 /* sprites, 256-dot resolution */
 static uint8_t  spr_col[256];             /* {palette set, colour} */
 static uint8_t  spr_on[256];
 static uint8_t  spr_fix[256];
 static uint8_t  spr_tr[256];              /* mode 3 transparency 0..3 */
+static unsigned spr_lo, spr_hi;           /* dots with spr_on set lie in [lo, hi] */
 
 /* ------------------------------------------------------------------ */
 /* Colours                                                             */
@@ -201,7 +213,6 @@ static void render_pattern(const line_t *l, unsigned n) {
         for (unsigned b = x & 7; b < 8 && i < n; b++, i++, x++) {
             uint8_t c = (pat & (0x80 >> b)) ? (color >> 4) : (color & 15);
             bg_idx[i] = c;
-            bg_zero[i] = c == 0;
         }
     }
 }
@@ -244,34 +255,53 @@ static void render_bitmap(const line_t *l, unsigned n) {
         unsigned run = 256 - xx;
         if (run > n - i) run = n - i;
         switch (l->mode) {
-        case V9968_MODE_G4:
-            for (unsigned k = 0; k < run; k++, xx++) {
-                uint8_t b = rd(l, row | (xx >> 1));
-                uint8_t c = (xx & 1) ? (b & 15) : (b >> 4);
-                bg_idx[i + k] = c;
-                bg_zero[i + k] = c == 0;
+        case V9968_MODE_G4: {
+            /* the row's 128 bytes are contiguous (G4 is never interleaved) */
+            const uint8_t *src = l->v->vram + v9968_phys(false, row);
+            uint8_t *d = bg_idx + i;
+            unsigned k = 0;
+            if (xx & 1) { d[k++] = src[xx >> 1] & 15; }
+            for (; k + 1 < run; k += 2) {
+                uint8_t b = src[(xx + k) >> 1];
+                d[k] = b >> 4;
+                d[k + 1] = b & 15;
             }
+            if (k < run) d[k] = src[(xx + k) >> 1] >> 4;
             break;
+        }
         case V9968_MODE_G5:
             for (unsigned k = 0; k < run; k++, xx++) {
                 uint8_t b = rd(l, row | (xx >> 1));
                 uint8_t c0 = (xx & 1) ? ((b >> 2) & 3) : (b >> 6);
                 uint8_t c1 = (xx & 1) ? (b & 3) : ((b >> 4) & 3);
-                bg_idx[2 * (i + k)] = c0;     bg_zero[2 * (i + k)] = c0 == 0;
-                bg_idx[2 * (i + k) + 1] = c1; bg_zero[2 * (i + k) + 1] = c1 == 0;
+                bg_idx[2 * (i + k)] = c0;
+                bg_idx[2 * (i + k) + 1] = c1;
             }
             break;
         case V9968_MODE_G6:
             for (unsigned k = 0; k < run; k++, xx++) {
                 uint8_t b = rd(l, row | xx);
-                bg_idx[2 * (i + k)] = b >> 4;     bg_zero[2 * (i + k)] = (b >> 4) == 0;
-                bg_idx[2 * (i + k) + 1] = b & 15; bg_zero[2 * (i + k) + 1] = (b & 15) == 0;
+                bg_idx[2 * (i + k)] = b >> 4;
+                bg_idx[2 * (i + k) + 1] = b & 15;
             }
             break;
-        default:                                    /* G7: raw bytes */
-            for (unsigned k = 0; k < run; k++, xx++)
-                bg_idx[i + k] = rd(l, row | xx);
+        default: {                                  /* G7: raw bytes */
+            /* consecutive dots of one row: one bank for even, one for odd
+             * addresses when interleaved, else straight */
+            const uint8_t *vr = l->v->vram;
+            if (!l->il) {
+                const uint8_t *src = vr + v9968_phys(false, row | xx);
+                for (unsigned k = 0; k < run; k++) bg_idx[i + k] = src[k];
+            } else {
+                /* row has its low 8 bits clear: dot xx is at base + xx / 2,
+                 * in the odd half (+0x10000) for odd xx */
+                const uint8_t *e = vr + ((row & 0x20000u) | ((row >> 1) & 0xFFFFu));
+                const uint8_t *o = e + 0x10000u;
+                for (unsigned k = 0; k < run; k++, xx++)
+                    bg_idx[i + k] = ((xx & 1u) ? o : e)[xx >> 1];
+            }
             break;
+        }
         }
         i += run;
         x += run;
@@ -397,8 +427,14 @@ static void render_sprites(const line_t *l, bool *any) {
             aa = (sat & ~0x1FFu) | (plane << 2);
         else
             aa = (sat & ~0x7Fu) | (plane << 2);
-        unsigned na = sp3 ? 8 : 4;
-        for (unsigned i = 0; i < na; i++) a[i] = rd(l, aa + i);
+        const uint8_t *asrc = v->vram + (aa & V9968_VRAM_MASK);
+        if (sp3) {
+            /* 8-byte aligned, not interleaved with mode 3: read in place,
+             * Y and MGY first, the rest only for a selected sprite */
+            a[0] = asrc[0]; a[1] = asrc[1]; a[2] = asrc[2];
+        } else {
+            for (unsigned i = 0; i < 4; i++) a[i] = rd(l, aa + i);
+        }
 
         bool visible;
         unsigned row;
@@ -419,6 +455,7 @@ static void render_sprites(const line_t *l, bool *any) {
             row = mag ? (off >> 1) & 15 : off & 15;
         }
         if (!visible) continue;
+        if (sp3) for (unsigned i = 3; i < 8; i++) a[i] = asrc[i];
         if (nsel >= limit) {
             sprite_overflow(v, plane);
             break;
@@ -431,7 +468,9 @@ static void render_sprites(const line_t *l, bool *any) {
     if (nsel == 0) return;
 
     memset(spr_on, 0, sizeof(spr_on));
-    memset(spr_fix, 0, sizeof(spr_fix));
+    if (!sp3) memset(spr_fix, 0, sizeof(spr_fix));
+    spr_lo = sp3 ? 255u : 0u;
+    spr_hi = sp3 ? 0u : 255u;
     bool cc0_found = false;
 
     for (unsigned s = 0; s < nsel; s++) {
@@ -448,10 +487,18 @@ static void render_sprites(const line_t *l, bool *any) {
             uint32_t addr = (spg + (pa << 3)) & V9968_VRAM_MASK;
             uint8_t pb[8];
             for (unsigned i = 0; i < 8; i++) pb[i] = v->vram[(addr + i) & V9968_VRAM_MASK];
+            /* divide(i, mgx, 0) with the constants of mgx worked out once */
+            unsigned dexp = 7, dcoeff = 0;
+            if (mgx) {                       /* mgx = 0 draws nothing */
+                while (!(mgx & (1u << dexp))) dexp--;
+                dcoeff = 65536u / (((mgx << (7 - dexp)) & 0x7F) + 128u);
+            }
             for (unsigned i = 0; i < mgx; i++) {
                 unsigned sx = (x0 + i) & 0x3FF;
                 if (sx >= 256) continue;
-                unsigned d = divide(i, mgx, 0);
+                unsigned mul = ((dcoeff * i) >> 5) & 0x1FFF;
+                unsigned d = (mul & 0xFFFF) >> dexp;
+                if (d > 15) d = 15;
                 if (ctl & 0x10) d = ~d & 15;
                 uint8_t nib = (d & 1) ? (pb[d >> 1] & 15) : (pb[d >> 1] >> 4);
                 if (!nib) continue;
@@ -460,6 +507,8 @@ static void render_sprites(const line_t *l, bool *any) {
                     continue;
                 }
                 spr_on[sx] = 1;
+                if (sx < spr_lo) spr_lo = sx;
+                if (sx > spr_hi) spr_hi = sx;
                 spr_col[sx] = (uint8_t)(((ctl & 15) << 4) | nib);
                 spr_tr[sx] = (uint8_t)(ctl >> 6);
             }
@@ -546,6 +595,65 @@ static void scale_out(const v9968_t *v, const uint16_t *src, unsigned n,
     for (unsigned i = left + pic; i < out_w; i++) out[i] = (i & 1) ? br : bl;
 }
 
+/* ---- 256-dot fast path: straight to RGB565 ----
+ * Palette and GRAPHIC7 colours converted once (gamma included), then one
+ * lookup per dot; only dots under a translucent sprite go through the
+ * 15-bit mix. Same output as the general path (c15 -> c15_to_565). */
+static uint16_t pal565[256], g7_565[256];
+static uint32_t out32[256];          /* when `out` is not 4-byte aligned */
+
+/* GRAPHIC4 straight to output words (render_bitmap's G4 case fused with the
+ * colour lookup); bg_idx is still filled for translucent sprites. */
+static void render_g4_fast(const line_t *l, unsigned n, uint32_t *o, const uint32_t *t32) {
+    unsigned x = l->x0;
+    for (unsigned i = 0; i < n; ) {
+        uint32_t row = bitmap_row(l, (x >> 8) & 1);
+        unsigned xx = x & 0xFF;
+        unsigned run = 256 - xx;
+        if (run > n - i) run = n - i;
+        const uint8_t *src = l->v->vram + v9968_phys(false, row);
+        uint8_t *d = bg_idx + i;
+        uint32_t *q = o + i;
+        unsigned k = 0;
+        if (xx & 1) { uint8_t c = src[xx >> 1] & 15; d[0] = c; q[0] = t32[c]; k = 1; }
+        const uint8_t *sp = src + ((xx + k) >> 1);
+        for (; k + 1 < run; k += 2) {
+            uint8_t b = *sp++;
+            uint8_t hi = b >> 4, lo = b & 15;
+            d[k] = hi; d[k + 1] = lo;
+            q[k] = t32[hi]; q[k + 1] = t32[lo];
+        }
+        if (k < run) { uint8_t c = *sp >> 4; d[k] = c; q[k] = t32[c]; }
+        i += run;
+        x += run;
+    }
+}
+static uint32_t pal565_gen = ~0u;
+static int pal565_gamma = -1, g7_565_gamma = -1;
+static const uint16_t *pal565_src;
+
+static const uint16_t *palette_565(const v9968_t *v) {
+    if (pal565_src != v->palette || pal565_gen != v->pal_gen || pal565_gamma != (int)v->gamma) {
+        uint32_t gen;
+        do {                /* a palette write in between: convert again */
+            gen = v->pal_gen;
+            for (unsigned i = 0; i < 256; i++) pal565[i] = c15_to_565(v->gamma, v->palette[i]);
+        } while (gen != v->pal_gen);
+        pal565_gen = gen;
+        pal565_gamma = v->gamma;
+        pal565_src = v->palette;
+    }
+    return pal565;
+}
+
+static const uint16_t *g7_colors_565(const v9968_t *v) {
+    if (g7_565_gamma != (int)v->gamma) {
+        for (unsigned i = 0; i < 256; i++) g7_565[i] = c15_to_565(v->gamma, g7_c15((uint8_t)i));
+        g7_565_gamma = v->gamma;
+    }
+    return g7_565;
+}
+
 V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsigned out_w) {
     line_t l;
     l.v = v;
@@ -578,7 +686,9 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
     l.ho_l = text ? 0 : (v->regs[27] & 7);
     l.x0 = text ? 0 : ((unsigned)(v->regs[26] & 0x3F) << 3);
 
-    for (unsigned i = 0; i < n; i++) c[i] = hires ? ((i & 1) ? br : bl) : bl;
+    bool fast = !text && !hires && !(l.mode == V9968_MODE_G7 && (v->regs[25] & 0x08));
+    if (!fast)
+        for (unsigned i = 0; i < n; i++) c[i] = hires ? ((i & 1) ? br : bl) : bl;
 
     if (text) {
         if (l.mode == V9968_MODE_T1) render_text1(&l, c);
@@ -588,14 +698,77 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
     }
 
     /* background, in source dots from ho_l on */
+    PROF_START();
     unsigned dots = 256 - l.ho_l;
     bool tp = v->regs[8] & 0x20;
     bool fixed = g7_fixed(v, l.mode);       /* over YJK sprites use the palette */
     if (l.mode <= V9968_MODE_G3 || l.mode == V9968_MODE_MC) render_pattern(&l, dots);
-    else                                                   render_bitmap(&l, dots);
+    else if (!(fast && l.mode == V9968_MODE_G4))           render_bitmap(&l, dots);
 
+    PROF_MARK(0);
     unsigned sub = hires ? 2 : 1;
     unsigned first = l.ho_l * sub, count = dots * sub;
+
+    if (fast) {
+        /* 256 dots, no YJK: the fast path. One 32-bit word per dot (the dot
+         * twice in RGB565), written straight into `out` when aligned. */
+        bool g7 = l.mode == V9968_MODE_G7, epal = v9968_epal(v);
+        const uint16_t *pal = palette_565(v);
+        const uint16_t *tbl = (g7 && !epal) ? g7_colors_565(v) : pal;
+        uint32_t bl32 = bl565 * 0x10001u;
+        unsigned pic = out_w < 512 ? out_w : 512, left = (out_w - pic) / 2;
+        bool direct = pic == 512 && !((uintptr_t)(out + left) & 3u);
+        uint32_t *o = direct ? (uint32_t *)(void *)(out + left) : out32;
+        for (unsigned i = 0; i < first; i++) o[i] = bl32;
+        if (g7) {
+            for (unsigned i = 0; i < count; i++) o[first + i] = tbl[bg_idx[i]] * 0x10001u;
+        } else {
+            /* 16 colours here (bg_idx < 16); colour 0 is the border unless TP */
+            uint32_t t32[16];
+            for (unsigned i = 0; i < 16; i++) t32[i] = tbl[i] * 0x10001u;
+            if (!tp) t32[0] = bl32;
+            if (l.mode == V9968_MODE_G4) render_g4_fast(&l, dots, o + first, t32);
+            else for (unsigned i = 0; i < count; i++) o[first + i] = t32[bg_idx[i]];
+        }
+        PROF_MARK(1);
+
+        bool any = false;
+        if (!(v->regs[8] & 0x02)) render_sprites(&l, &any);
+        if (any) {
+            bool sp3 = v9968_sp3(v);
+            unsigned x1 = spr_hi + 1u;
+            for (unsigned x = spr_lo > l.ho_l ? spr_lo : l.ho_l; x < x1; x++) {
+                if (!spr_on[x]) continue;
+                uint8_t col = spr_col[x];
+                uint16_t c565;
+                if (fixed) {
+                    c565 = tbl[g7_sprite[col & 15]];          /* fixed => G7 colours */
+                } else if (sp3 && spr_tr[x]) {
+                    /* translucent: mix in 15 bits over this dot's background */
+                    unsigned b = bg_idx[x - l.ho_l];
+                    uint16_t bgc = g7 ? (epal ? v->palette[b] : g7_c15((uint8_t)b))
+                                      : ((b == 0 && !tp) ? bl : v->palette[b]);
+                    c565 = c15_to_565(v->gamma, mix_c15(bgc, v->palette[col], spr_tr[x]));
+                } else {
+                    c565 = pal[col];
+                }
+                o[x] = c565 * 0x10001u;
+            }
+        }
+        PROF_MARK(2);
+
+        /* left mask (R#25 MSK): the first 8 dots show the border */
+        if (v->regs[25] & 0x02)
+            for (unsigned i = 0; i < 8; i++) o[i] = bl32;
+
+        for (unsigned i = 0; i < left; i++) out[i] = (uint16_t)bl565;
+        if (!direct)
+            for (unsigned i = 0; i < pic / 2; i++)
+                out[left + 2 * i] = out[left + 2 * i + 1] = (uint16_t)o[i];
+        for (unsigned i = left + pic; i < out_w; i++) out[i] = (uint16_t)bl565;
+        PROF_MARK(3);
+        return;
+    }
     if (l.mode == V9968_MODE_G7) {
         if (v->regs[25] & 0x08) {
             /* J and K need a whole 4-dot group: the YJK picture comes out 4
@@ -608,13 +781,14 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
         else                         for (unsigned i = 0; i < count; i++) c[first + i] = g7_c15(bg_idx[i]);
     } else {
         for (unsigned i = 0; i < count; i++) {
-            if (bg_zero[i] && !tp)
+            if (bg_idx[i] == 0 && !tp)
                 c[first + i] = (hires && ((first + i) & 1)) ? br : bl;
             else
                 c[first + i] = v->palette[bg_idx[i]];
         }
     }
 
+    PROF_MARK(1);
     /* sprites */
     bool any = false;
     if (!(v->regs[8] & 0x02)) render_sprites(&l, &any);
@@ -646,9 +820,11 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
         }
     }
 
+    PROF_MARK(2);
     /* left mask (R#25 MSK): the first 8 dots show the border */
     if (v->regs[25] & 0x02)
         for (unsigned i = 0; i < 8 * sub; i++) c[i] = (hires && (i & 1)) ? br : bl;
 
     scale_out(v, c, n, (uint16_t)bl565, (uint16_t)br565, out, out_w);
+    PROF_MARK(3);
 }

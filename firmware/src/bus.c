@@ -387,6 +387,15 @@ void bus_print_stats(bool reset) {
            (unsigned long)dvi_lines.render_max_us, (unsigned long)dvi_lines.render_late,
            (unsigned long)dvi_lines.src_height, (unsigned long)dvi_lines.scale,
            (unsigned long)(dvi_lines.scale * 3178u / 100u));
+#ifdef V9968_PROF
+    if (chip == VDP_CHIP_V9968) {
+        extern volatile uint32_t v9968_prof_us[4];
+        printf("v9968 render stages (us total): background %lu, colours %lu, sprites %lu, output %lu\n",
+               (unsigned long)v9968_prof_us[0], (unsigned long)v9968_prof_us[1],
+               (unsigned long)v9968_prof_us[2], (unsigned long)v9968_prof_us[3]);
+        if (reset) for (int i = 0; i < 4; i++) v9968_prof_us[i] = 0;
+    }
+#endif
     if (reset) {
         stats.cmd_us = 0;
         stats.cmd_slices = 0;

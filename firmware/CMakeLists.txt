@@ -40,6 +40,9 @@ if(V9990_PSRAM_CS_PIN)
     target_compile_definitions(msx_v9990 PRIVATE V9990_PSRAM_CS_PIN=${V9990_PSRAM_CS_PIN})
 endif()
 
+# V9968 renderer stage timing for "stat"
+target_compile_definitions(msx_v9990 PRIVATE V9968_PROF=1)
+
 # Boot trace: wait for the USB terminal, then print each boot step
 option(MSX_BOOT_TRACE "Wait for USB serial and trace the boot steps" OFF)
 if(MSX_BOOT_TRACE)
@@ -77,5 +80,10 @@ target_link_libraries(msx_v9990
 # USB CDC for debug output; UART0 pins are used by the MSX bus.
 pico_enable_stdio_usb(msx_v9990 1)
 pico_enable_stdio_uart(msx_v9990 0)
+
+# Run everything from SRAM: code fetched from flash stalls whenever the QMI
+# is busy with PSRAM, and helpers easily end up there (memcpy, the V9968
+# command engine, geo3d, ...). Flash is only read at boot and for settings.
+pico_set_binary_type(msx_v9990 copy_to_ram)
 
 pico_add_extra_outputs(msx_v9990)

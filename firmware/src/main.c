@@ -80,6 +80,8 @@ static void __not_in_flash_func(v9990_fetch)(const v9990_t *v, uint32_t phys,
     }
 }
 
+uint32_t __not_in_flash_func(v9968_prof_now)(void) { return timer_hw->timerawl; }
+
 /* USB serial "bench": time the parts of rendering one line of the current
  * V9990 picture (on a copy of the VDP state), to find where time goes. */
 static v9990_t bench_vdp;
@@ -98,8 +100,55 @@ static uint32_t __not_in_flash_func(bench_fetch)(uint32_t phys, uint32_t len) {
     return (timer_hw->timerawl - t0) * 10u / 20u;
 }
 
+#ifdef V9968_PROF
+extern volatile uint32_t v9968_prof_us[4];
+#endif
+static v9968_t bench_v9968;
+
+/* V9968: every line of the current picture once, on a copy of the VDP
+ * state, with IRQs off (core1 keeps running) and then with sprites off. */
+static void __not_in_flash_func(bench_v9968_frame)(uint32_t res[6]) {
+    unsigned h = v9968_display_height(&bench_v9968);
+#ifdef V9968_PROF
+    uint32_t p0[4];
+    for (int i = 0; i < 4; i++) p0[i] = v9968_prof_us[i];
+#endif
+    uint32_t t0 = timer_hw->timerawl, mx = 0;
+    for (unsigned y = 0; y < h; y++) {
+        uint32_t t = timer_hw->timerawl;
+        v9968_render_line(&bench_v9968, y, bench_out, DVI_WIDTH);
+        t = timer_hw->timerawl - t;
+        if (t > mx) mx = t;
+    }
+    res[0] = (timer_hw->timerawl - t0) * 10u / h;        /* 0.1 us units */
+    res[1] = mx;
+#ifdef V9968_PROF
+    for (int i = 0; i < 4; i++) res[2 + i] = (v9968_prof_us[i] - p0[i]) * 10u / h;
+#else
+    for (int i = 0; i < 4; i++) res[2 + i] = 0;
+#endif
+}
+
+static void main_bench_v9968(void) {
+    uint32_t full[6], nospr[6];
+    uint32_t irq = save_and_disable_interrupts();
+    bench_v9968 = v9968;
+    bench_v9968_frame(full);
+    bench_v9968.regs[8] |= 0x02;                          /* SPD */
+    bench_v9968_frame(nospr);
+    restore_interrupts(irq);
+    printf("bench v9968 (IRQs off, per line x0.1us): full avg %lu max %lu us "
+           "[bg %lu col %lu spr %lu out %lu]; no sprites avg %lu max %lu us "
+           "[bg %lu col %lu spr %lu out %lu]\n",
+           (unsigned long)full[0], (unsigned long)full[1], (unsigned long)full[2],
+           (unsigned long)full[3], (unsigned long)full[4], (unsigned long)full[5],
+           (unsigned long)nospr[0], (unsigned long)nospr[1], (unsigned long)nospr[2],
+           (unsigned long)nospr[3], (unsigned long)nospr[4], (unsigned long)nospr[5]);
+}
+
 void main_bench(void) {
-    if (chip != VDP_CHIP_V9990) { printf("bench: V9990 only\n"); return; }
+    if (chip == VDP_CHIP_V9968) { main_bench_v9968(); return; }
+    if (chip != VDP_CHIP_V9990) { printf("bench: V9990/V9968 only\n"); return; }
     unsigned line = dvi_lines.src_height / 2;
     uint32_t irq = save_and_disable_interrupts();
     bench_vdp = v9990;
@@ -190,9 +239,16 @@ static void __not_in_flash_func(render_loop_v9968)(void) {
         uint32_t height = dvi_lines.src_height;
         if (next < height && pos >= (int32_t)next * scale - 1 &&
             pos < (int32_t)height * scale) {
+            /* late: line `next` is already on screen when its rendering starts */
+            if (pos >= (int32_t)next * scale) dvi_lines.render_late++;
+            uint32_t t0 = timer_hw->timerawl;
             v9968_render_line(&v9968, next,
                               dvi_lines.line[next & (DVI_LINE_BUFFERS - 1)].px,
                               DVI_WIDTH);
+            uint32_t dt = timer_hw->timerawl - t0;
+            dvi_lines.render_lines++;
+            dvi_lines.render_us += dt;
+            if (dt > dvi_lines.render_max_us) dvi_lines.render_max_us = dt;
             next++;
         }
     }

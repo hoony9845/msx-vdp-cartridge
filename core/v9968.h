@@ -125,6 +125,7 @@ typedef struct v9968 {
 
     uint8_t  pal_index, pal_phase, pal_r, pal_g;
     uint16_t palette[256];   /* 0RRRRRGGGGGBBBBB, 5 bits each */
+    volatile uint32_t pal_gen;  /* counts palette writes (renderer colour cache) */
     bool     gamma;          /* apply the cartridge's output gamma */
 
     volatile uint8_t int_flags;   /* V9968_INT_* */
