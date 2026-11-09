@@ -37,6 +37,7 @@ static_assert(PIN_D0 == PIN_A0 + 4, "data bus must follow A0-A3");
 #define V9968_BLOCK 8u                          /* V9968 ports at nibble 8-F */
 #define V9968_CLK_PER_US 86u                    /* command engine: 85.9MHz */
 #define V9968_SLICE 512u                        /* max clocks per loop pass */
+#define V9968_CHUNK 32u                         /* clocks between bus event checks */
 #define V9990_CMD_SLICE 4u                      /* command engine units per loop pass */
 
 static uint32_t ring[RING_WORDS] __attribute__((aligned(1u << RING_BITS)));
@@ -249,6 +250,9 @@ static void __not_in_flash_func(loop_v9990)(void) {
     }
 }
 
+/* "dump": hold the V9968 command engine (bus events still served) */
+volatile bool bus_cmd_hold;
+
 static void __not_in_flash_func(loop_v9968)(void) {
     uint32_t tail = 0;
     bool in_reset = false;
@@ -278,9 +282,18 @@ static void __not_in_flash_func(loop_v9968)(void) {
         credit += (int32_t)((now - last_us) * V9968_CLK_PER_US);
         last_us = now;
         if (credit > (int32_t)V9968_SLICE) credit = V9968_SLICE;
-        if (credit > 0 && (v9968_cmd_busy(v9968) || v9968->geo.running)) {
-            credit -= (int32_t)v9968_service(v9968, (unsigned)credit);
-            refresh_v9968();
+        if (credit > 0 && !bus_cmd_hold && (v9968_cmd_busy(v9968) || v9968->geo.running)) {
+            /* In small pieces, back to the bus as soon as an event waits: a
+             * slice of 512 clocks is 20-30 us of CPU, and a status read ~6 us
+             * after "R#15 = 2" could get the old status register (SUPER CAT
+             * went on while its LRMM was still running). */
+            do {
+                unsigned b = credit > (int32_t)V9968_CHUNK ? V9968_CHUNK : (unsigned)credit;
+                unsigned used = v9968_service(v9968, b);
+                credit -= (int32_t)used;
+                refresh_v9968();
+                if (used < b) break;              /* done, or waiting for the CPU */
+            } while (credit > 0 && ring_head() == tail);
         } else {
             read_table[V9968_BLOCK + V9968_PORT_CTRL] = v9968_peek_port(v9968, V9968_PORT_CTRL);
             read_table[V9968_BLOCK + V9968_PORT_INT] = v9968_peek_port(v9968, V9968_PORT_INT);
@@ -389,11 +402,12 @@ void bus_print_stats(bool reset) {
            (unsigned long)(dvi_lines.scale * 3178u / 100u));
 #ifdef V9968_PROF
     if (chip == VDP_CHIP_V9968) {
-        extern volatile uint32_t v9968_prof_us[4];
-        printf("v9968 render stages (us total): background %lu, colours %lu, sprites %lu, output %lu\n",
+        extern volatile uint32_t v9968_prof_us[6];
+        printf("v9968 render stages (us total): background %lu, colours %lu, sprites %lu (select %lu, draw %lu), output %lu\n",
                (unsigned long)v9968_prof_us[0], (unsigned long)v9968_prof_us[1],
-               (unsigned long)v9968_prof_us[2], (unsigned long)v9968_prof_us[3]);
-        if (reset) for (int i = 0; i < 4; i++) v9968_prof_us[i] = 0;
+               (unsigned long)v9968_prof_us[2], (unsigned long)v9968_prof_us[4],
+               (unsigned long)v9968_prof_us[5], (unsigned long)v9968_prof_us[3]);
+        if (reset) for (int i = 0; i < 6; i++) v9968_prof_us[i] = 0;
     }
 #endif
     if (reset) {

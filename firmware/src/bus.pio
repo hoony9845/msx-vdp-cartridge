@@ -18,7 +18,7 @@
 ; ISR shifts left, no autopush.
 .wrap_target
     wait 1 gpio PIN_CS
-    wait 0 gpio PIN_CS [15]     ; let /RD and the data bus settle (~60ns @252MHz)
+    wait 0 gpio PIN_CS [23]     ; let /RD and the data bus settle (~60ns @384MHz)
     in pins, 12
     jmp pin is_write            ; /RD high -> write cycle
     set x, 1
@@ -41,7 +41,7 @@ emit:
 idle:
     mov isr, x
     wait 1 gpio PIN_CS
-    wait 0 gpio PIN_CS [3]
+    wait 0 gpio PIN_CS [5]      ; (~16ns @384MHz)
     jmp pin idle                ; /RD high -> write cycle, not ours
     in pins, 4                  ; port number
     in null, 2                  ; * 4 bytes

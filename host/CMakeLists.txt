@@ -47,3 +47,7 @@ target_compile_options(v9968_cmd_replay PRIVATE -Wall -Wextra)
 add_executable(replay9968 replay9968.c)
 target_link_libraries(replay9968 v9990_core)
 target_compile_options(replay9968 PRIVATE -Wall -Wextra)
+
+add_executable(v9968_dump_replay v9968_dump_replay.c)
+target_link_libraries(v9968_dump_replay v9990_core)
+target_compile_options(v9968_dump_replay PRIVATE -Wall -Wextra)

@@ -12,6 +12,7 @@
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
+#include "hardware/pll.h"
 #include "hardware/structs/qmi.h"
 #include "hardware/sync.h"
 #include "hardware/timer.h"
@@ -22,7 +23,14 @@
 #include "psram.h"
 #include "vdp_select.h"
 
-#define SYS_CLOCK_KHZ  252000u      /* = 10 x 25.2MHz DVI pixel clock */
+/* Clocks (overclocked: the V9968 sprite mode 3 renderer needs it):
+ *   pll_sys 252MHz -> clk_hstx /2 = 126MHz (10 x 25.2MHz DVI pixel clock)
+ *   pll_usb 384MHz -> clk_sys, and clk_usb /8 = 48MHz
+ * clk_hstx has only an integer divider without duty-cycle correction, and
+ * HSTX shifts on both edges: clk_sys/3 (378MHz) gave a 33% duty cycle and
+ * mostly black pictures on the monitor; an even divider keeps it at 50%. */
+#define PLL_SYS_KHZ    252000u
+#define SYS_CLOCK_KHZ  384000u
 #define HSTX_CLOCK_HZ  126000000u   /* 2 bits per clock, 5 clocks per pixel */
 
 static vdp_chip_t chip;
@@ -44,12 +52,21 @@ static void __no_inline_not_in_flash_func(set_flash_divisor)(uint32_t clkdiv, ui
 }
 
 static void init_clocks(void) {
-    vreg_set_voltage(VREG_VOLTAGE_1_20);
+    vreg_set_voltage(VREG_VOLTAGE_1_30);
     sleep_ms(10);
-    set_flash_divisor(3, 2);                     /* 84MHz flash at 252MHz */
-    set_sys_clock_khz(SYS_CLOCK_KHZ, true);
-    clock_configure(clk_hstx, 0, CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS,
-                    SYS_CLOCK_KHZ * 1000u, HSTX_CLOCK_HZ);
+    set_flash_divisor(5, 3);                     /* 76.8MHz flash at 384MHz */
+    set_sys_clock_khz(PLL_SYS_KHZ, true);        /* clk_sys = pll_sys for now */
+    clock_configure(clk_hstx, 0, CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+                    PLL_SYS_KHZ * 1000u, HSTX_CLOCK_HZ);
+    /* pll_usb 1536MHz VCO / 4 / 1 = 384MHz (USB is not running yet) */
+    pll_init(pll_usb, 1, 1536u * MHZ, 4, 1);
+    clock_configure(clk_usb, 0, CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                    SYS_CLOCK_KHZ * 1000u, 48u * MHZ);
+    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                    SYS_CLOCK_KHZ * 1000u, SYS_CLOCK_KHZ * 1000u);
+    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                    SYS_CLOCK_KHZ * 1000u, SYS_CLOCK_KHZ * 1000u);
 }
 
 /* ---- video callbacks ---- */
@@ -101,17 +118,17 @@ static uint32_t __not_in_flash_func(bench_fetch)(uint32_t phys, uint32_t len) {
 }
 
 #ifdef V9968_PROF
-extern volatile uint32_t v9968_prof_us[4];
+extern volatile uint32_t v9968_prof_us[6];
 #endif
 static v9968_t bench_v9968;
 
 /* V9968: every line of the current picture once, on a copy of the VDP
  * state, with IRQs off (core1 keeps running) and then with sprites off. */
-static void __not_in_flash_func(bench_v9968_frame)(uint32_t res[6]) {
+static void __not_in_flash_func(bench_v9968_frame)(uint32_t res[8]) {
     unsigned h = v9968_display_height(&bench_v9968);
 #ifdef V9968_PROF
-    uint32_t p0[4];
-    for (int i = 0; i < 4; i++) p0[i] = v9968_prof_us[i];
+    uint32_t p0[6];
+    for (int i = 0; i < 6; i++) p0[i] = v9968_prof_us[i];
 #endif
     uint32_t t0 = timer_hw->timerawl, mx = 0;
     for (unsigned y = 0; y < h; y++) {
@@ -123,14 +140,41 @@ static void __not_in_flash_func(bench_v9968_frame)(uint32_t res[6]) {
     res[0] = (timer_hw->timerawl - t0) * 10u / h;        /* 0.1 us units */
     res[1] = mx;
 #ifdef V9968_PROF
-    for (int i = 0; i < 4; i++) res[2 + i] = (v9968_prof_us[i] - p0[i]) * 10u / h;
+    for (int i = 0; i < 6; i++) res[2 + i] = (v9968_prof_us[i] - p0[i]) * 10u / h;
 #else
-    for (int i = 0; i < 4; i++) res[2 + i] = 0;
+    for (int i = 0; i < 6; i++) res[2 + i] = 0;
 #endif
 }
 
+/* USB serial "dump": the V9968 state the renderer reads, for replaying
+ * one picture on the PC (host/v9968_dump_replay). The command engine is held while
+ * VRAM goes out; all-zero 64-byte blocks are left out. */
+void main_dump(void) {
+    if (chip != VDP_CHIP_V9968) { printf("dump: V9968 only\n"); return; }
+    extern volatile bool bus_cmd_hold;
+    bus_cmd_hold = true;
+    busy_wait_us(500);
+    printf("DUMP begin\nregs");
+    for (int i = 0; i < 64; i++) printf(" %02x", v9968.regs[i]);
+    printf("\npal");
+    for (int i = 0; i < 256; i++) printf(" %04x", v9968.palette[i]);
+    printf("\nmisc %u %u %u %u %u\n", (unsigned)v9968.field, (unsigned)v9968.blink_page,
+           (unsigned)v9968.shuffle_start, (unsigned)v9968.gamma, (unsigned)v9968.sprite_status);
+    for (uint32_t a = 0; a < V9968_VRAM_SIZE; a += 64) {
+        const uint8_t *p = v9968_vram + a;
+        bool zero = true;
+        for (int i = 0; i < 64; i++) if (p[i]) { zero = false; break; }
+        if (zero) continue;
+        printf("V %05lx ", (unsigned long)a);
+        for (int i = 0; i < 64; i++) printf("%02x", p[i]);
+        printf("\n");
+    }
+    printf("DUMP end\n");
+    bus_cmd_hold = false;
+}
+
 static void main_bench_v9968(void) {
-    uint32_t full[6], nospr[6];
+    uint32_t full[8], nospr[8];
     uint32_t irq = save_and_disable_interrupts();
     bench_v9968 = v9968;
     bench_v9968_frame(full);
@@ -138,10 +182,11 @@ static void main_bench_v9968(void) {
     bench_v9968_frame(nospr);
     restore_interrupts(irq);
     printf("bench v9968 (IRQs off, per line x0.1us): full avg %lu max %lu us "
-           "[bg %lu col %lu spr %lu out %lu]; no sprites avg %lu max %lu us "
+           "[bg %lu col %lu spr %lu (select %lu draw %lu) out %lu]; no sprites avg %lu max %lu us "
            "[bg %lu col %lu spr %lu out %lu]\n",
            (unsigned long)full[0], (unsigned long)full[1], (unsigned long)full[2],
-           (unsigned long)full[3], (unsigned long)full[4], (unsigned long)full[5],
+           (unsigned long)full[3], (unsigned long)full[4], (unsigned long)full[6],
+           (unsigned long)full[7], (unsigned long)full[5],
            (unsigned long)nospr[0], (unsigned long)nospr[1], (unsigned long)nospr[2],
            (unsigned long)nospr[3], (unsigned long)nospr[4], (unsigned long)nospr[5]);
 }
@@ -220,8 +265,14 @@ static void __not_in_flash_func(render_loop_v9990)(void) {
     }
 }
 
-/* V9968: render line n during the last output line of n - 1, after the
- * line interrupt of n - 1 had (most of) a line time to change registers. */
+/* V9968: render line n from the last output line of n - 1 - V9968_LINES_AHEAD
+ * on. The just-in-time start (last output line of n - 1, after the line
+ * interrupt of n - 1) leaves 31.7 us, which pictures full of mode 3 sprites
+ * overrun (LUMEN FORGE: up to ~90 us a line at 384MHz, in runs); starting
+ * two VDP lines early absorbs most of it, and register changes made from a
+ * line interrupt show that many lines later than on the cartridge. */
+#define V9968_LINES_AHEAD 2           /* at most DVI_LINE_BUFFERS - 2 */
+
 static void __not_in_flash_func(render_loop_v9968)(void) {
     uint32_t frame = dvi_lines.frame;
     uint32_t next = 0;
@@ -237,8 +288,10 @@ static void __not_in_flash_func(render_loop_v9968)(void) {
         int32_t pos = dvi_lines.pos;
         int32_t scale = (int32_t)dvi_lines.scale;
         uint32_t height = dvi_lines.src_height;
-        if (next < height && pos >= (int32_t)next * scale - 1 &&
-            pos < (int32_t)height * scale) {
+        /* not before the frame starts (vblank end, at output line -scale) */
+        int32_t start = ((int32_t)next - V9968_LINES_AHEAD) * scale - 1;
+        if (start < -scale) start = -scale;
+        if (next < height && pos >= start && pos < (int32_t)height * scale) {
             /* late: line `next` is already on screen when its rendering starts */
             if (pos >= (int32_t)next * scale) dvi_lines.render_late++;
             uint32_t t0 = timer_hw->timerawl;
