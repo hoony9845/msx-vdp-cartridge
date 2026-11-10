@@ -1,5 +1,7 @@
 # MSX V9990 / V9968 Emulator Cartridge (RP2350)
 
+[English](#english)
+
 MSX 실기기에서 **V9990(GFX9000)과 V9968을 가장 저렴하게 경험**해 보기 위한 프로젝트다.
 실제 V9990 칩이나 FPGA 없이 RP2350 보드 하나가 MSX 버스를 받아 VDP처럼 동작하고,
 화면은 HDMI(DVI 640×480@60)로 출력한다. V9990 모드에서는 I/O 포트 0x60–0x6F를 쓴다.
@@ -158,8 +160,9 @@ USB 시리얼 명령(진단용):
 
 ## 알려진 위험
 
-- **같은 포트를 연속으로 빠르게 읽을 때** (R800 `INIR`): core1이 `read_table`을 갱신하기 전에 다음 읽기가 오면 이전 값이 나간다.
-  대책은 `/WAIT`(GPIO28, 배선은 해 둠)이다.
+- **읽기마다 `/WAIT`**: 읽기 SM이 모든 읽기에서 `/WAIT`를 걸고, core1이 앞선 접근을 모두 처리한 뒤에 응답한다
+  (쓰기 직후의 상태 읽기, 같은 포트 연속 읽기도 순서대로 맞는다). 그만큼 읽기 사이클이 길어진다. core1이 20us 안에
+  응답하지 못하면 `stat`의 ordered-read timeouts가 늘어난다.
 - **렌더 시간**: VRAM0(물리 0x00000-0x3FFFF)은 SRAM, VRAM1은 PSRAM이다. 비트맵 한 줄은 XIP 스트리밍 DMA로
   읽는다(126MHz). 한계에 가까운 모드: B3 512×424 BD8 줄당 약 29us(한계 31.7us), P1(Petscii Robots)
   평균 60us(한계 63us). BD16 512×424는 아직 측정하지 않았다.
@@ -189,3 +192,204 @@ USB 시리얼 명령(진단용):
   이 코어가 들어간 펌웨어 바이너리(`.uf2`)를 배포할 때도 같은 표시를 함께 넣어야 한다.
 - 외부 코드와 참고 자료의 표시: `THIRD_PARTY_NOTICES.md`
 - 모든 라이선스는 보증 없이(AS IS) 제공되며, 사용에 따른 위험과 책임은 이용자에게 있다(위의 면책 참고).
+
+---
+
+<a id="english"></a>
+
+# English
+
+This project is the **cheapest way to try the V9990 (GFX9000) and the V9968 on a real MSX**.
+There is no real V9990 chip or FPGA: a single RP2350 board listens to the MSX bus and behaves like the VDP,
+and the picture goes out over HDMI (DVI 640×480@60). In V9990 mode it uses I/O ports 0x60–0x6F.
+
+| On a real MSX | Geo3D test (V9968 + geo3d) |
+|---|---|
+| [![Running on a real MSX (YouTube)](https://img.youtube.com/vi/r0W5C8UGfvY/hqdefault.jpg)](https://youtu.be/r0W5C8UGfvY) | [![Geo3D test (YouTube)](https://img.youtube.com/vi/VtkUM869Wkc/hqdefault.jpg)](https://youtu.be/VtkUM869Wkc) |
+
+> **Note: this is an emulator.** The VDP is imitated in software, not built as a chip.
+> The V9990 follows the Yamaha manual and openMSX's behaviour, the V9968 follows HRA!'s RTL,
+> but results (picture, timing, command speed, ...) can differ from a real V9990 chip or the V9968
+> cartridge (RTL). Known differences are listed under [Known risks](#known-risks).
+
+> **Disclaimer: you use this project entirely at your own risk.** The schematics, PCB, firmware and
+> source code are provided "AS IS", without any warranty. All damage and risk from building or using
+> them, including failure of the MSX, peripherals or monitor and loss of data, are borne entirely by
+> the user; the author accepts no liability whatsoever.
+
+The cartridge's slide switch (SW1, PCB rev 0.2) also selects **V9968 + geo3d v2.0** (compatible with HRA!'s
+V9968 cartridge, ports 88h–8Fh). The switch changes both the port decoder and the firmware's choice.
+On the rev 0.1 board without the switch, choose in the firmware (`-DMSX_VDP_SWITCH=OFF`, USB serial `chip v9968`).
+Details: [docs/v9968.md](docs/v9968.md) (Korean)
+
+- Prototype boards: **Pimoroni Pico Plus 2** (RP2350B, 16MB flash, 8MB PSRAM)
+  or **Waveshare Core2350B1/B2** (`-DPICO_BOARD=waveshare_core2350b`)
+- Wiring: [docs/hardware.md](docs/hardware.md) (Korean)
+- Cartridge PCB (KiCad 8, with Gerbers for JLCPCB): [hardware/](hardware/README.md) (Korean)
+
+> **Only one combination has been verified on hardware:** the Core2350B PCB (rev 0.3) + **Waveshare Core2350B2** (8MB PSRAM).
+> The Pico Plus 2 PCB and the Core2350B1 (2MB PSRAM) have not been built or tested.
+
+## Layout
+
+```
+core/        portable VDP core (no Pico SDK dependencies, shared by the PC and the firmware)
+  v9990.c        ports, registers, palette, mode decoding, timing events
+  v9990_cmd.c    command engine (blitter)
+  v9990_render.c scanline renderer -> RGB565
+  v9990_vram.h   physical VRAM layout (P1/P2/Bx bank interleave)
+  v9968*.c       V9968: ports/registers, command engine (incl. LRMM/LFMx), renderer (sprite mode 3)
+  geo3d.c        geo3d v2.0 (reference model ported to C, issues commands to the V9968 engine)
+host/        PC tests, render demo, trace replayers (gcc)
+tools/compare/  dot-exact comparison against openMSX (GFX9000), game recording tools
+firmware/    RP2350 firmware (pico-sdk)
+  src/bus.pio    bus monitor + read response PIO programs
+  src/bus.c      core1: bus events, command engine, /INT
+  src/dvi_out.c  HSTX DVI output, V9990 timing (VBlank, line interrupts)
+  src/psram.c    PSRAM (VRAM) setup
+  src/main.c     clocks (384MHz, HSTX 126MHz), chip selection, core0 render loop
+  src/vdp_select.c  chip selection setting (stored in flash, USB serial command)
+hardware/    cartridge PCB (KiCad project generator scripts, Gerbers/BOM/CPL)
+docs/        hardware documents
+```
+
+## How it works
+
+```
+MSX OUT ─► PIO monitor ─► DMA ─► ring buffer ─► core1 ─► v9990_write_port()
+MSX IN  ─► PIO read SM ─► DMA ─► read_table[port] ─► PIO drives D0-D7
+                                      ▲
+                     core1 keeps it current with v9990_peek_port()
+core0: DVI DMA IRQ ─► renderer runs v9990_render_line() 2–3 lines ahead
+```
+
+- Reads are answered by PIO and DMA alone, without the CPU, well inside a Z80 I/O cycle (about 700ns).
+- The 512KB of VRAM lives in PSRAM (the 520KB of internal SRAM is not enough).
+
+## Build
+
+Toolchain paths (on the development machine):
+
+```sh
+export PICO_SDK_PATH=~/tools/pico/pico-sdk
+export PICO_TOOLCHAIN_PATH=~/tools/pico/toolchain
+export PATH=~/tools/pico/cmake/bin:$PATH     # picotool needs cmake 3.17 or later
+```
+
+### PC tests
+
+```sh
+cmake -S host -B build-host -G Ninja && ninja -C build-host
+./build-host/test_v9990                           # unit tests
+./build-host/render_demo build-host/demo.ppm      # 640x480 output image
+```
+
+### Firmware
+
+```sh
+cmake -S firmware -B build-fw -G Ninja && ninja -C build-fw
+# connect in BOOTSEL mode and copy build-fw/msx_v9990.uf2
+```
+
+Other RP2350B boards:
+`cmake -S firmware -B build-fw -DPICO_BOARD=<board> -DV9990_PSRAM_CS_PIN=<gpio>`
+
+USB serial commands (diagnostics):
+
+| Command | What it does |
+|---|---|
+| `stat [reset]` | core1 loop, bus events, counts per port, `/INT` and `/WAIT`, V9990 registers, render times, DVI state (measured clocks, late IRQs, output restarts). `reset` clears the maxima |
+| `psram [sweep]` | PSRAM write/read check and streaming read speed. `sweep` checks every clock divider and RX delay (clears VRAM) |
+| `vram` | CRC32 of each 64KB VRAM block (to compare with a PC replay) |
+| `out <port> <value>` | write a V9990 port directly (hex; tries modes without an MSX) |
+| `bench` | V9990: render time of one line of the current picture (full, without sprites, with all VRAM in SRAM, display off, VRAM read speed). V9968: average and maximum over all lines of the current picture, per stage |
+| `dump` | prints the V9968 state (registers, palette, VRAM); `host/v9968_dump_replay` draws the log on the PC (about 70 s, the command engine stops meanwhile) |
+
+Built with `-DMSX_BOOT_TRACE=ON`, the firmware waits up to 60 s for a USB terminal at boot and prints the boot steps.
+`stat` prints from the render loop, so sending it periodically breaks the picture of that frame.
+
+## Status
+
+| Area | Status |
+|---|---|
+| Ports P#0–P#7, register write masks, VRAM pointers (updated on R#2/R#5), palette | ✅ (PC tests) |
+| Display mode decoding (P1, P2, B1–B7, incl. MCS, manual table 8.3) | ✅ (PC tests) |
+| Interrupts (VI, HI, CE), status registers | ✅ basic |
+| P1: two layers, palette per layer, front/back areas (R#27), scrolling | ✅ (PC tests) |
+| P2: 1024×512 image, even/odd byte palettes | ✅ (PC tests) |
+| P1/P2 sprites: 125, 16 per line, front/back priority, palettes | ✅ (PC tests) |
+| Vertical scroll splits (SCAY written mid-line), R512/R256 roll | ✅ (PC tests) |
+| Bitmap rendering BP2/BP4/BP6/BD8/BD16 | ✅ (PC tests) |
+| Commands: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, LINE, PSET (bitmap coordinates, FC/BC/WM bit positions) | ✅ (PC tests) |
+| Two bitmap cursors (32×32, palette/EOR, cursor 0 first) | ✅ (PC tests, after openMSX's behaviour) |
+| Firmware: PIO bus, DVI output, PSRAM, dual core | ✅ on hardware (Core2350B: Chase H.Q. racing, Petscii Robots in game) |
+| YJK/YUV, R#16 display adjust | ⬜ TODO |
+| Command P1/P2 coordinate systems (same mapping as openMSX, checked with Ghosts'n Goblins on hardware) | ✅ |
+| Commands: LMCM, CMMK, BMxx, SRCH, POINT, ADVN | ⬜ TODO |
+| HR bit (firmware: toggles every two DVI lines) | ✅ basic |
+| Command timing, line timing accuracy, PAL 50Hz timing | ⬜ TODO |
+| 15kHz RGB output (PIO + resistor DAC) | ⬜ optional |
+| **V9968 + geo3d v2.0** (chosen by the firmware setting): all screen modes, sprite modes 1–3, all commands, interrupts | ✅ (PC tests, compared with the RTL, the reference model and the openMSX fork) — [docs/v9968.md](docs/v9968.md) |
+
+References: Yamaha V9990 Application Manual (1992); where the manual is silent, openMSX's implementation.
+Compared with openMSX 16.0 through `tools/compare/`, every test scene matches dot for dot.
+In real games:
+- **Chase H.Q. V9990** (DiHalt Studio, 90 s of play): 76 of 78 captures match. For the other 2 the VRAM at that moment equals openMSX's (a difference in scan timing).
+- **Another World** (Edd Biddulph, turbo R, 4-minute intro): all 113 match.
+- MSXdev/Mapax titles (60 s of automatic input in openMSX, power-on screens excluded):
+  - **Attack of the Petscii Robots** (P1, sprites): all 33 match.
+  - **MSX in a Row** (B3 BD16, LMMC, bitmap cursor): 21 match, 11 differ by under 0.1% (one line at the bottom of the cursor, not investigated).
+  - **Dreams Puzzle** (B3 BD16, LINE), **Mr. Balloon remake** (B7 1024 BP4): VRAM equal at 26 of 30 points;
+    the rest is only the area of a command started in the previous frame (openMSX gives commands time).
+    The B7 picture cannot be compared dot by dot because openMSX scales its capture to 640 pixels.
+- **Ghosts'n Goblins** (ASM Team, V9990 demo, Konami SCC 2MB, B1 BP6/BP4 + P1 sprites, LMMV/LMMM in P1):
+  all 66 shots of a recorded play match. Without the P1 command coordinates the demon sprite was garbled.
+
+The firmware renderer draws 2–3 lines ahead of the scan, so register changes mid-picture take effect a few lines early (TODO).
+A new frame starts 4 lines before its first line (line counter reset), so scroll values written by the VI handler apply from the first line.
+
+`VERIFY` comments in the code mark what has not yet been checked against the V9990 Application Manual or openMSX
+(the display mode table, bit orders, the meaning of NX/NY = 0, ...).
+
+## Next steps
+
+1. Compatibility tests on hardware with other GFX9000 software (P1/P2, sprites, command engine)
+2. PAL games (R#7 bit 3): decide whether VI runs at 50Hz (the HDMI output is fixed at 60Hz)
+3. Command engine speed: PSRAM contention during play lengthens render times (B1 average 34us of 63us)
+
+## Known risks
+
+- **`/WAIT` on every read**: the read SM asserts `/WAIT` on every read and answers after core1 has applied every
+  earlier access (a status read right after a write, or back-to-back reads of one port, come out in order). Read
+  cycles get longer by that much. If core1 does not answer within 20us, `stat` counts an ordered-read timeout.
+- **Render time**: VRAM0 (physical 0x00000-0x3FFFF) is in SRAM, VRAM1 in PSRAM. A bitmap line is read with XIP
+  streaming DMA (126MHz). Modes near the limit: B3 512×424 BD8 about 29us a line (limit 31.7us), P1 (Petscii Robots)
+  60us average (limit 63us). BD16 512×424 not measured yet.
+- **P1/P2 name table cache**: a name table row is read once per tile row (8 lines). A name changed mid-frame may
+  show on the remaining lines of that tile row only in the next frame.
+- **PSRAM at 126MHz**: RX delays 2–5 work on one Core2350B (3 is used). Temperature margin unknown.
+- **384MHz overclock at 1.30V**: clk_sys from pll_usb (384MHz), HSTX from pll_sys (252MHz)/2. The HSTX divider
+  only divides by integers and has no duty-cycle correction, so at clk_sys/3 (378MHz) the monitor showed mostly black.
+  Checked on one Core2350B; margins across boards and temperatures unknown.
+- **V9968 renders two lines ahead**: pictures with much sprite mode 3 (LUMEN FORGE) take up to about 90us a line,
+  too late when drawn just before the line (31.7us). In exchange, registers changed by line interrupts show two lines
+  later than on the real cartridge.
+- **V9968 LRMM speed**: LRMM on core1 is several times slower than the real chip (about 12 clocks per pixel), so demos
+  that draw the whole picture with LRMM (SUPER CAT about 11 fps) move slower than on the real thing. The results
+  equal HRA's vdp_command.v.
+
+## References
+
+- Yamaha V9990 E-VDP-III Application Manual
+- openMSX `src/video/v9990/` (behaviour only, no code taken)
+- pico-examples `hstx/dvi_out_hstx_encoder`
+
+## License
+
+- Software (`core/`, `firmware/`, `host/`, `tools/`): MIT (`LICENSE`)
+- Hardware (`hardware/`): CERN-OHL-P v2 (`hardware/LICENSE`)
+- Exception: the V9968 core (`core/v9968*.c`, `core/v9968.h`) follows HRA!'s V9968 RTL and therefore keeps
+  that RTL's conditions (keep the copyright notice; no sale or commercial use without permission).
+  Firmware binaries (`.uf2`) containing this core must carry the same notice when distributed.
+- Notices for third-party code and references: `THIRD_PARTY_NOTICES.md`
+- All licences come without warranty (AS IS); the risk and responsibility of use lie with the user (see the disclaimer above).
