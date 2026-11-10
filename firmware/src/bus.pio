@@ -11,6 +11,11 @@
 ;   v9990_bus_monitor : reports every access to core1 (via DMA ring buffer)
 ;   v9990_bus_read    : answers reads from a 16-entry response table (via DMA)
 ;
+; Ordered reads: the read SM holds the CPU with /WAIT until core1 has applied
+; every earlier access (it gets to this read in the ring and raises IRQ 4),
+; so a status read right after a register write sees that write. IRQ 5 tells
+; core1 the value is taken, before it applies the read's own side effects.
+;
 
 .program v9990_bus_monitor
 .define PUBLIC PIN_CS 20
@@ -34,6 +39,7 @@ emit:
 .program v9990_bus_read
 .define PUBLIC PIN_CS 20
 ; X = response_table_address >> 6 (table is 16 words, 64-byte aligned).
+; set pins = PIN_WAIT (through the 74LVC07: 0 asserts /WAIT).
 ; The pushed word is the address of the response word for this port; a DMA
 ; channel reads that word and puts it in the TX FIFO.
 ; ISR shifts left, OSR shifts right, no autopush/autopull.
@@ -43,13 +49,17 @@ idle:
     wait 1 gpio PIN_CS
     wait 0 gpio PIN_CS [5]      ; (~16ns @384MHz)
     jmp pin idle                ; /RD high -> write cycle, not ours
+    set pins, 0                 ; assert /WAIT
+    wait 1 irq 4                ; core1 has caught up with this read
     in pins, 4                  ; port number
     in null, 2                  ; * 4 bytes
     push block
     pull block                  ; response byte from the table
+    irq set 5                   ; value taken
     out pins, 8
     mov osr, ~null
     out pindirs, 8              ; drive D0-D7
+    set pins, 1                 ; release /WAIT
     wait 1 gpio PIN_CS
     mov osr, null
     out pindirs, 8              ; release the bus

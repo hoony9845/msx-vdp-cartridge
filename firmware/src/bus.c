@@ -55,6 +55,7 @@ static volatile struct {
     uint32_t resets;
     uint32_t fault_pc, fault_lr, fault_core;
     uint32_t cmd_us, cmd_slices;   /* time in the command engine while busy */
+    uint32_t read_timeouts;    /* ordered reads the read SM did not take */
 } stats;
 
 static vdp_chip_t chip;
@@ -78,7 +79,10 @@ static void init_gpio(void) {
 
     /* 74LVC07 open-drain buffers: GPIO high = released */
     gpio_init(PIN_INT);  gpio_put(PIN_INT, 1);  gpio_set_dir(PIN_INT, GPIO_OUT);
-    gpio_init(PIN_WAIT); gpio_put(PIN_WAIT, 1); gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    /* /WAIT: driven by the read SM (ordered reads), released to start */
+    pio_sm_set_pins_with_mask(bus_pio, sm_read, 1u << PIN_WAIT, 1u << PIN_WAIT);
+    pio_sm_set_pindirs_with_mask(bus_pio, sm_read, 1u << PIN_WAIT, 1u << PIN_WAIT);
+    pio_gpio_init(bus_pio, PIN_WAIT);
 }
 
 static void init_monitor_sm(void) {
@@ -111,7 +115,9 @@ static void init_read_sm(void) {
     sm_config_set_in_shift(&c, false, false, 32);   /* shift left */
     sm_config_set_out_shift(&c, true, false, 32);   /* shift right */
     sm_config_set_jmp_pin(&c, PIN_RD);
+    sm_config_set_set_pins(&c, PIN_WAIT, 1);
     pio_sm_init(bus_pio, sm_read, offset, &c);
+    pio_sm_set_pins_with_mask(bus_pio, sm_read, 1u << PIN_WAIT, 1u << PIN_WAIT);
 
     /* X = table address >> 6 */
     pio_sm_put_blocking(bus_pio, sm_read, (uint32_t)(uintptr_t)read_table >> 6);
@@ -183,6 +189,27 @@ static inline uint32_t __not_in_flash_func(ring_head)(void) {
     return ((dma_hw->ch[dma_ring].write_addr - (uintptr_t)ring) / 4u) & (RING_WORDS - 1u);
 }
 
+/* Ordered reads (bus.pio): the read SM holds the CPU on /WAIT at this read
+ * until here, where every earlier access has been applied and the table
+ * refreshed. Let it answer, and return once it took the value, so that the
+ * read's own side effects (VRAM pointer, flags) are applied after. */
+#define READ_IRQ_GO   4u
+#define READ_IRQ_DONE 5u
+
+static inline void __not_in_flash_func(ordered_read)(void) {
+    bus_pio->irq_force = 1u << READ_IRQ_GO;
+    uint32_t t0 = timer_hw->timerawl;
+    while (!(bus_pio->irq & (1u << READ_IRQ_DONE))) {
+        if (timer_hw->timerawl - t0 > 20u) {
+            /* the read SM did not see this read (took it for a write) */
+            bus_pio->irq = 1u << READ_IRQ_GO;
+            stats.read_timeouts++;
+            return;
+        }
+    }
+    bus_pio->irq = 1u << READ_IRQ_DONE;
+}
+
 static inline void __not_in_flash_func(stat_event)(uint32_t ev) {
     uint8_t port = (ev >> 1) & 0x0F;
     stats.events++;
@@ -215,6 +242,7 @@ static void __not_in_flash_func(loop_v9990)(void) {
             tail = (tail + 1u) & (RING_WORDS - 1u);
             stat_event(ev);
             uint8_t port = (ev >> 1) & 0x0F;
+            if (ev & 1u) ordered_read();
             if (port < 8) {
                 if (ev & 1u)
                     (void)v9990_read_port(v9990, port);
@@ -268,11 +296,20 @@ static void __not_in_flash_func(loop_v9968)(void) {
             tail = (tail + 1u) & (RING_WORDS - 1u);
             stat_event(ev);
             uint8_t port = (ev >> 1) & 0x0F;
+            if (ev & 1u) ordered_read();
             if (port >= V9968_BLOCK) {
                 if (ev & 1u)
                     (void)v9968_read_port(v9968, port - V9968_BLOCK);
-                else
+                else {
+                    /* A geo3d RUN transforms and classifies the whole model
+                     * before it reports busy, and the CPU reads the status
+                     * ~3 us after RUN: show busy first (refreshed below), or
+                     * it takes geo3d as done and loads the next model over
+                     * the one being drawn (GEO3D BASICS' dice). */
+                    if (port - V9968_BLOCK == V9968_PORT_GEO_DATA)
+                        read_table[V9968_BLOCK + V9968_PORT_GEO_INDEX] |= 0x05;
                     v9968_write_port(v9968, port - V9968_BLOCK, (uint8_t)(ev >> 5));
+                }
                 refresh_v9968();
             }
         }
@@ -324,7 +361,9 @@ void __attribute__((used)) bus_fault_record(uint32_t *frame) {
     stats.fault_lr = frame[5];
     stats.fault_core = get_core_num() + 1u;
     gpio_put(PIN_INT, 1);
+    gpio_init(PIN_WAIT);                    /* from the read SM back to SIO */
     gpio_put(PIN_WAIT, 1);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
     for (;;) __asm volatile("wfi");
 }
 
@@ -342,11 +381,12 @@ void bus_print_stats(bool reset) {
     uint32_t now = timer_hw->timerawl;
     uint32_t loops = stats.loops;
     printf("core1: %lu loops (%lu/ms since last stat), max pass %lu us, "
-           "max backlog %lu/%u, MSX resets %lu\n",
+           "max backlog %lu/%u, MSX resets %lu, ordered-read timeouts %lu\n",
            (unsigned long)loops,
            (unsigned long)((loops - prev_loops) / ((now - prev_us) / 1000u + 1u)),
            (unsigned long)stats.max_loop_us, (unsigned long)stats.max_backlog,
-           (unsigned)RING_WORDS, (unsigned long)stats.resets);
+           (unsigned)RING_WORDS, (unsigned long)stats.resets,
+           (unsigned long)stats.read_timeouts);
     prev_loops = loops;
     prev_us = now;
     if (stats.fault_core)
@@ -413,6 +453,7 @@ void bus_print_stats(bool reset) {
     if (reset) {
         stats.cmd_us = 0;
         stats.cmd_slices = 0;
+        stats.read_timeouts = 0;
         dvi_lines.render_lines = 0;
         dvi_lines.render_us = 0;
         dvi_lines.render_max_us = 0;
