@@ -10,6 +10,9 @@
  * LINE / LRMM commands are then produced one at a time, whenever the V9968
  * command engine is idle (geo3d_next_command), as the RTL's issuer does.
  * Like the openMSX device, the geometry itself takes no emulated time.
+ *
+ * The ported model is MIT, Copyright (c) 2026 Alex Moncks; see
+ * THIRD_PARTY_NOTICES.md.
  */
 #ifndef GEO3D_H
 #define GEO3D_H

@@ -10,6 +10,9 @@
  *
  * The DMA IRQ also drives the VDP's timing: vblank start/end and line
  * events, through the callbacks of dvi_vdp_t.
+ *
+ * pico-examples: Copyright 2020 (c) 2020 Raspberry Pi (Trading) Ltd.,
+ * BSD-3-Clause; see THIRD_PARTY_NOTICES.md.
  */
 #include <assert.h>
 #include <string.h>

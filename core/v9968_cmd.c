@@ -14,6 +14,10 @@
  * caller hands in a budget in the same unit. The compatible-speed waits
  * ({40, 2'b11} clocks per access) and the high-speed figures measured on
  * the RTL (LINE about 7, LRMM about 12 clocks per pixel) are approximated.
+ *
+ * Follows HRA!'s V9968 RTL (Copyright (C) 2025 Takayuki Hara) and is
+ * distributed under its conditions, including the non-commercial clause;
+ * see THIRD_PARTY_NOTICES.md.
  */
 #include "v9968.h"
 

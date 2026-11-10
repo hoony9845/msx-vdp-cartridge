@@ -1,6 +1,10 @@
 /*
  * V9968 core: ports, registers, palette, status, interrupts, timing events.
  * Behaviour follows vdp_cpu_interface.v and vdp_timing_control_ssg.v.
+ *
+ * Follows HRA!'s V9968 RTL (Copyright (C) 2025 Takayuki Hara) and is
+ * distributed under its conditions, including the non-commercial clause;
+ * see THIRD_PARTY_NOTICES.md.
  */
 #include <string.h>
 #include "v9968.h"

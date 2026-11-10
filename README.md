@@ -159,5 +159,14 @@ USB 시리얼 명령(진단용):
 ## 참고
 
 - Yamaha V9990 E-VDP-III Application Manual
-- openMSX `src/video/v9990/` (레퍼런스 구현, GPL: 코드를 가져오면 이 프로젝트도 GPL이 됨)
+- openMSX `src/video/v9990/` (동작만 참고, 코드는 가져오지 않음)
 - pico-examples `hstx/dvi_out_hstx_encoder`
+
+## 라이선스
+
+- 소프트웨어(`core/`, `firmware/`, `host/`, `tools/`): MIT (`LICENSE`)
+- 하드웨어(`hardware/`): CERN-OHL-P v2 (`hardware/LICENSE`)
+- 예외: V9968 코어(`core/v9968*.c`, `core/v9968.h`)는 HRA!의 V9968 RTL을 따라 만들었기 때문에
+  그 RTL의 조건을 따른다(저작권 표시 유지, 허락 없는 판매·상업적 사용 금지).
+  이 코어가 들어간 펌웨어 바이너리(`.uf2`)를 배포할 때도 같은 표시를 함께 넣어야 한다.
+- 외부 코드와 참고 자료의 표시: `THIRD_PARTY_NOTICES.md`

@@ -15,6 +15,10 @@
  * Reference: HRA!'s RTL (hra1129/V9968_Cartridge, fpga/.../src/v9968) and
  * the V9968 programmer's manual; geo3d follows the bit-exact Python model of
  * alexmoncks/V9968_Cartridge (branch geo3d-v2.0, geo3d/sim/gen_scenes.py).
+ *
+ * Follows HRA!'s V9968 RTL (Copyright (C) 2025 Takayuki Hara) and is
+ * distributed under its conditions, including the non-commercial clause;
+ * see THIRD_PARTY_NOTICES.md.
  */
 #ifndef V9968_H
 #define V9968_H

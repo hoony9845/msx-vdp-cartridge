@@ -13,3 +13,4 @@ hardware/msx_v9990_cart_core2350b/fp-info-cache
 hardware/msx_v9990_cart_core2350b/*.kicad_prl
 *.lck
 __pycache__/
+tools/compare/v9968/rtl/tb.vvp

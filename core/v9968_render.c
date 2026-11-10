@@ -14,6 +14,10 @@
  *
  * The address formulas and the pixel rules follow
  * vdp_timing_control_screen_mode.v, vdp_sprite_*.v and vdp_color_palette.v.
+ *
+ * Follows HRA!'s V9968 RTL (Copyright (C) 2025 Takayuki Hara) and is
+ * distributed under its conditions, including the non-commercial clause;
+ * see THIRD_PARTY_NOTICES.md.
  */
 #include <string.h>
 #include "v9968.h"
