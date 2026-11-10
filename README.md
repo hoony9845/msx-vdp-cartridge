@@ -4,7 +4,9 @@ MSX 실기기에서 **V9990(GFX9000)과 V9968을 가장 저렴하게 경험**해
 실제 V9990 칩이나 FPGA 없이 RP2350 보드 하나가 MSX 버스를 받아 VDP처럼 동작하고,
 화면은 HDMI(DVI 640×480@60)로 출력한다. V9990 모드에서는 I/O 포트 0x60–0x6F를 쓴다.
 
-[![MSX 실기에서 동작하는 모습 (YouTube)](https://img.youtube.com/vi/r0W5C8UGfvY/hqdefault.jpg)](https://youtu.be/r0W5C8UGfvY)
+| MSX 실기 동작 | Geo3D 테스트 (V9968 + geo3d) |
+|---|---|
+| [![MSX 실기에서 동작하는 모습 (YouTube)](https://img.youtube.com/vi/r0W5C8UGfvY/hqdefault.jpg)](https://youtu.be/r0W5C8UGfvY) | [![Geo3D 테스트 (YouTube)](https://img.youtube.com/vi/VtkUM869Wkc/hqdefault.jpg)](https://youtu.be/VtkUM869Wkc) |
 
 > **주의: 에뮬레이터다.** 실제 칩이 아니라 소프트웨어로 VDP 동작을 흉내 낸다.
 > V9990은 Yamaha 매뉴얼과 openMSX 동작을, V9968은 HRA!의 RTL을 기준으로 맞췄지만,
@@ -24,6 +26,9 @@ MSX 실기기에서 **V9990(GFX9000)과 V9968을 가장 저렴하게 경험**해
   또는 **Waveshare Core2350B1/B2** (`-DPICO_BOARD=waveshare_core2350b`)
 - 결선: [docs/hardware.md](docs/hardware.md)
 - 카트리지 PCB (KiCad 8, JLCPCB 주문용 거버 포함): [hardware/](hardware/README.md)
+
+> **실기 검증된 조합은 하나뿐이다:** Core2350B판 PCB(rev 0.3) + **Waveshare Core2350B2**(PSRAM 8MB).
+> Pico Plus 2판 PCB와 Core2350B1(PSRAM 2MB)은 제작·검증하지 않았다.
 
 ## 구조
 

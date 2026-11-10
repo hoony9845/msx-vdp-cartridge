@@ -8,6 +8,9 @@ RP2350 모듈을 얹는 MSX 카트리지 기판. 회로 설명은 [../docs/hardw
 | Pico Plus 2 | Pimoroni Pico Plus 2 (2×20 핀헤더) | `msx_v9990_cart/` | `fab/` | `./build.sh` |
 | Core2350B | Waveshare Core2350B **B1(2MB) 또는 B2(8MB) PSRAM판** (2×8 핀헤더 4개) | `msx_v9990_cart_core2350b/` | `fab_core2350b/` | `MSX_VARIANT=core2350b ./build.sh` |
 
+> **검증 상태:** 실기에서 확인한 것은 **Core2350B판 rev 0.3 + Waveshare Core2350B2(PSRAM 8MB)** 뿐이다.
+> Pico Plus 2판과 Core2350B1(PSRAM 2MB) 조합은 제작·검증하지 않았다.
+
 ### Core2350B 버전 메모
 
 - PSRAM이 모듈 뒷면에 있으므로 **반드시 핀헤더로 띄워서** 장착한다. 모듈 아래에는 배선과 비아가 지나간다.
