@@ -480,6 +480,26 @@ static void write_line_regs(v9968_t *v, const uint8_t b[11]) {
     start(v, b[10]);
 }
 
+/* R#32-R#45, R#47-R#50, R#46 in one go (geo3d's LRMM), likewise (R#34
+ * clears SY's fraction). */
+static void write_lrmm_regs(v9968_t *v, const uint8_t b[19]) {
+    v9968_cmd_state_t *c = &v->cmd;
+    bool v256 = !v9968_v58(v);
+    c->reg_sx = (uint16_t)(b[0] | ((b[1] & 0x0F) << 8));
+    c->font_addr = b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)(b[2] & 3) << 16);
+    c->sy = ((uint32_t)b[2] << 8) | ((uint32_t)(b[3] & 0x1F) << 16);
+    c->reg_dx = (uint16_t)(b[4] | ((b[5] & 1) << 8));
+    c->dy = (uint16_t)(b[6] | ((b[7] & (v256 ? 7 : 3)) << 8));
+    c->reg_nx = (uint16_t)(b[8] | ((b[9] & 7) << 8));
+    c->reg_ny = (uint16_t)(b[10] | ((b[11] & (v256 ? 7 : 3)) << 8));
+    c->color = b[12];
+    c->transfer_ready = false;
+    c->arg = b[13];
+    c->vx = (uint16_t)(b[14] | (b[15] << 8));
+    c->vy = (uint16_t)(b[16] | (b[17] << 8));
+    start(v, b[18]);
+}
+
 void v9968_cmd_read_color(v9968_t *v) {
     v->cmd.read_color = true;
     v->cmd.transfer_ready = false;
@@ -839,6 +859,58 @@ lrmm_any(ctx_t *x, unsigned b, unsigned layout, bool il, bool xhr) {
     lrmm_row(x, b, layout, x->bpp, il, xhr, false);
 }
 
+/* A row's last pixel (NX = R#40), as step_one does it: the source (or
+ * the colour outside the window), put_pixel, then advance() at the end of
+ * a row (SX/SY from the row start, which steps; DX back to R#36, DY on,
+ * NX = 1, NY on unless it was the last row) and finish() after the last
+ * row or at the bottom edge. The window must not be empty. */
+V9968_HOT static void __attribute__((noinline))
+lrmm_last(ctx_t *x, unsigned layout, bool il, bool xhr) {
+    v9968_cmd_state_t *c = x->c;
+    unsigned bpp = x->bpp;
+    uint8_t *vram = x->v->vram;
+    const bool diy = arg_diy(c);
+    const uint32_t wxr = (uint32_t)(c->wex - c->wsx), wyr = (uint32_t)(c->wey - c->wsy);
+    uint8_t src = lrmm_src(vram, c->sx, c->sy, layout, bpp, il, xhr, c->wsx, wxr, c->wsy, wyr, c->color);
+
+    uint32_t d = c->dx, y = c->dy, a;
+    if (layout == 0)      a = (y & 0x7FFu) << 7 | ((d >> 1) & 0x7Fu);
+    else if (layout == 1) a = (y & 0x7FFu) << 7 | ((d >> 2) & 0x7Fu);
+    else if (layout == 2) a = (y & 0x3FFu) << 8 | ((d >> 1) & 0xFFu);
+    else                  a = (y & 0x3FFu) << 8 | (d & 0xFFu);
+    a = v9968_phys(il, a);
+    uint8_t base = vram[a];
+    if (bpp == 4) {
+        uint8_t p = lop(c->lop, src, (d & 1) ? (base & 0x0F) : (base >> 4));
+        vram[a] = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F)) : (uint8_t)((base & 0x0F) | (p << 4));
+    } else if (bpp == 2) {
+        unsigned sh = 6 - 2 * (d & 3);
+        uint8_t p = lop(c->lop, src, (base >> sh) & 3);
+        vram[a] = (uint8_t)((base & ~(3u << sh)) | ((p & 3u) << sh));
+    } else {
+        vram[a] = lop(c->lop, src, base);
+    }
+    x->cost += x->hs ? COST_READ_HS * 2 + COST_WRITE_HS : COST_ACCESS_SLOW * 3;
+
+    uint32_t next_dy = (diy ? y - 1u : y + 1u) & 0x1FFFu;
+    bool dy_ovf = (next_dy & 0x1000) != 0;
+    unsigned w_ny = (c->ny + 1u) & 0xFFFu;
+    bool ny_end = c->ny == c->reg_ny || (w_ny & 0x800) || ((w_ny & 0x400) && !x->v256);
+
+    uint32_t svy = sext16(c->vy, xhr ? 1 : 0), svx = sext16(c->vx, xhr ? 1 : 0);
+    c->sx = (c->sx2 - svy) & 0xFFFFFu;
+    c->sy = (c->sy2 + svx) & 0x1FFFFFu;
+    c->sx2 = (c->sx2 - svy) & 0xFFFFFu;
+    c->sy2 = (c->sy2 + svx) & 0x1FFFFFu;
+    c->dx = c->reg_dx;
+    if (c->bit_count == 0) c->font_addr = (c->font_addr + 1) & 0x3FFFFu;
+    c->bit_count = 7;
+    c->dy = (uint16_t)(next_dy & (x->v256 ? 0x7FFu : 0x3FFu));
+    c->nx = 1;
+    if (!ny_end) c->ny = (uint16_t)((c->ny + 1u) & 0x7FF);
+    if (ny_end || dy_ovf) finish(x, false);
+}
+
 V9968_HOT static void lrmm_run(ctx_t *x, unsigned budget) {
     v9968_cmd_state_t *c = x->c;
     /* an empty window: every pixel is outside, step_one does them */
@@ -855,7 +927,8 @@ V9968_HOT static void lrmm_run(ctx_t *x, unsigned budget) {
         if (fast) fast(x, budget);
         else      lrmm_any(x, budget, layout, il, xhr);
         if (x->cost >= budget || yield_now(x, x->cost)) break;
-        step_one(x);                    /* the row's last pixel, or at the edge */
+        if (c->nx == c->reg_nx) lrmm_last(x, layout, il, xhr);   /* the row's last pixel */
+        else step_one(x);                                        /* at the edge */
     }
 }
 
@@ -1197,6 +1270,7 @@ V9968_HOT unsigned v9968_service(v9968_t *v, unsigned budget) {
             unsigned n = geo3d_next_command(g, b);
             if (n == 0) g->running = false;
             if (n == 11 && geo3d_command_reg(n, 0) == 36) write_line_regs(v, b);
+            else if (n == GEO3D_CMD_MAX && geo3d_command_reg(n, 14) == 47) write_lrmm_regs(v, b);
             else for (unsigned k = 0; k < n; k++) v9968_cmd_write_reg(v, geo3d_command_reg(n, k), b[k]);
         }
         used += v9968_cmd_step(v, budget - used);
