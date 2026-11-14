@@ -74,6 +74,8 @@ typedef struct {
     uint16_t nvis;
     int32_t  row, row_end;          /* face spans: current/last row */
     int32_t  fx[4], fy[4];          /* the current face's projected corners */
+    int32_t  fu[4], fv[4];          /* and its texture coordinates (0 untextured) */
+    bool     ftex;                  /* the current face is textured */
     geo3d_vis_t vis[GEO3D_NMEM];
     /* wireframe RUN: the edges to draw, clipped once by the RUN (the Z80
      * must not write the model while the RUN is busy) */
