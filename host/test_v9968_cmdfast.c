@@ -1,5 +1,5 @@
 /*
- * The command engine's fast paths (LRMM, HMMM, LMMM) against the general
+ * The command engine's fast paths (LRMM, HMMM, LMMM, LINE) against the general
  * per-pixel code: random commands in every bitmap mode, run in lockstep in
  * random budgets; the command
  * state and the clocks used must match after every call, and VRAM at the
@@ -48,9 +48,15 @@ int main(int argc, char **argv) {
         for (unsigned r = 32; r <= 58; r++) if (r != 45 && r != 46) wr(r, (uint8_t)rnd());
         /* sizes that end in reasonable time; sometimes the 11-bit edges */
         unsigned nx = (rnd() & 7) == 0 ? (rnd() & 0x7FF) : (rnd() % 300);
-        unsigned ny = (rnd() & 7) == 0 ? 0 : (rnd() % 40);
+        unsigned ny = (rnd() & 3) == 0 ? 0 : (rnd() % 40);   /* NY = 0: horizontal LINEs */
         wr(40, (uint8_t)nx); wr(41, (uint8_t)(nx >> 8));
         wr(42, (uint8_t)ny); wr(43, (uint8_t)(ny >> 8));
+        if ((rnd() & 7) == 0) { wr(38, 0); wr(39, 0); }  /* DY at the edges */
+        if ((rnd() & 7) == 0) {                          /* DX at the edges */
+            static const uint16_t ex[4] = { 0, 255, 256, 511 };
+            uint16_t e = ex[rnd() & 3];
+            wr(36, (uint8_t)e); wr(37, (uint8_t)(e >> 8));
+        }
         if (rnd() & 1) {                                 /* a plain window most times */
             wr(51, 0); wr(52, 0); wr(53, 0); wr(54, 0);
             wr(55, 0xFF); wr(56, 1); wr(57, 0xFF); wr(58, 7);
@@ -63,8 +69,8 @@ int main(int argc, char **argv) {
             wr(49, (uint8_t)vy); wr(50, (uint8_t)(vy >> 8));
         }
         wr(45, (uint8_t)rnd());                          /* DIX/DIY/XHR/FG4 ... */
-        static const uint8_t ops[3] = { 0x30, 0x90, 0xD0 };          /* LRMM, LMMM, HMMM */
-        uint8_t op = ops[rnd() % 3];
+        static const uint8_t ops[4] = { 0x30, 0x90, 0xD0, 0x70 };    /* LRMM, LMMM, HMMM, LINE */
+        uint8_t op = ops[rnd() % 4];
         wr(46, (uint8_t)(op | ((rnd() & 1) ? 0 : (rnd() & 0x0F))));     /* IMP half the time */
 
         /* the first destination bytes (layout as G4/G7 without interleave) */
@@ -84,19 +90,28 @@ int main(int argc, char **argv) {
             const volatile uint32_t *w = v9968_cmd_watch;
             v9968_cmd_watch = NULL;
             v9968_cmd_reference = true;
-            unsigned ua = v9968_cmd_step(&va, watching ? ub : budget);
+            /* (a command that ends without a pixel, e.g. LINE from DX >= 256 in
+             * a 256-pixel mode, uses 0 clocks: give the general code 1) */
+            unsigned ua = v9968_cmd_step(&va, watching ? (ub ? ub : 1) : budget);
             v9968_cmd_reference = false;
             v9968_cmd_watch = w;
             if (ua != ub || memcmp(&va.cmd, &vb.cmd, sizeof(va.cmd)) != 0 ||
                 va.int_flags != vb.int_flags) {
                 printf("FAIL command %u (op %x mode G%u r20 %02x arg %02x) call %u budget %u: "
                        "clocks %u / %u\n", n, va.cmd.op, m + 4, r20, va.cmd.arg, call, budget, ua, ub);
+                const uint8_t *pa = (const uint8_t *)&va.cmd, *pb = (const uint8_t *)&vb.cmd;
+                for (unsigned o = 0; o < sizeof(va.cmd); o++)
+                    if (pa[o] != pb[o]) printf("  cmd byte %u: %02x / %02x\n", o, pa[o], pb[o]);
+                printf("  state %u/%u int %02x/%02x\n", va.cmd.state, vb.cmd.state, va.int_flags, vb.int_flags);
                 return 1;
             }
             pixels += ua;
         }
         if (memcmp(vram_a, vram_b, V9968_VRAM_SIZE) != 0) {
-            printf("FAIL command %u: VRAM differs\n", n);
+            printf("FAIL command %u: VRAM differs (op %x mode G%u lop %x arg %02x color %02x dx %u dy %u nx %u ny %u)\n",
+                   n, va.cmd.op, m + 4, va.cmd.lop, va.cmd.arg, va.cmd.color, dxw, dyw, nx, ny);
+            for (unsigned i = 0, k = 0; i < V9968_VRAM_SIZE && k < 6; i++)
+                if (vram_a[i] != vram_b[i]) { printf("  %05x: %02x / %02x\n", i, vram_a[i], vram_b[i]); k++; }
             return 1;
         }
     }

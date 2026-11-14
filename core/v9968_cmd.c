@@ -20,6 +20,7 @@
  * see THIRD_PARTY_NOTICES.md.
  */
 #include <stddef.h>
+#include <string.h>
 #include "v9968.h"
 
 enum {
@@ -462,6 +463,21 @@ void v9968_cmd_write_reg(v9968_t *v, unsigned reg, uint8_t data) {
     case 58: c->wey = (uint16_t)((c->wey & 0x0FF) | ((data & 7) << 8)); break;
     default: break;
     }
+}
+
+/* R#36-R#46 in one go (geo3d's LINE): what v9968_cmd_write_reg does for
+ * each of them in turn; every pair writes both bytes of its register. */
+static void write_line_regs(v9968_t *v, const uint8_t b[11]) {
+    v9968_cmd_state_t *c = &v->cmd;
+    bool v256 = !v9968_v58(v);
+    c->reg_dx = (uint16_t)(b[0] | ((b[1] & 1) << 8));
+    c->dy = (uint16_t)(b[2] | ((b[3] & (v256 ? 7 : 3)) << 8));
+    c->reg_nx = (uint16_t)(b[4] | ((b[5] & 7) << 8));
+    c->reg_ny = (uint16_t)(b[6] | ((b[7] & (v256 ? 7 : 3)) << 8));
+    c->color = b[8];
+    c->transfer_ready = false;
+    c->arg = b[9];
+    start(v, b[10]);
 }
 
 void v9968_cmd_read_color(v9968_t *v) {
@@ -976,6 +992,181 @@ V9968_HOT static void mm_run(ctx_t *x, unsigned budget) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* LINE fast path                                                      */
+/* ------------------------------------------------------------------ */
+
+/* LINE's last pixel (NX = R#40), as step_one: put_pixel, the LINE parts of
+ * advance() at the end of the line (SX back to R#32, LRMM's row start
+ * stepped, DX/DY/NYB as for any pixel; NX stays) and finish(). */
+static inline __attribute__((always_inline))
+void line_last(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il) {
+    v9968_cmd_state_t *c = x->c;
+    if (x->cost >= budget) return;
+    uint32_t d = c->dx, y = c->dy;
+    if ((d & 0x100) && !c->wide) { finish(x, false); return; }
+    const bool dix = arg_dix(c), diy = arg_diy(c), maj = arg_maj(c);
+    const unsigned lopc = c->lop;
+    const uint8_t src = c->source;
+    uint32_t a;
+    if (layout == 0)      a = (y & 0x7FFu) << 7 | ((d >> 1) & 0x7Fu);
+    else if (layout == 1) a = (y & 0x7FFu) << 7 | ((d >> 2) & 0x7Fu);
+    else if (layout == 2) a = (y & 0x3FFu) << 8 | ((d >> 1) & 0xFFu);
+    else                  a = (y & 0x3FFu) << 8 | (d & 0xFFu);
+    a = v9968_phys(il, a);
+    uint8_t *vram = x->v->vram;
+    uint8_t base = vram[a];
+    if (bpp == 4) {
+        uint8_t p = lop(lopc, src, (d & 1) ? (base & 0x0F) : (base >> 4));
+        vram[a] = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F)) : (uint8_t)((base & 0x0F) | (p << 4));
+    } else if (bpp == 2) {
+        unsigned sh = 6 - 2 * (d & 3);
+        uint8_t p = lop(lopc, src, (base >> sh) & 3);
+        vram[a] = (uint8_t)((base & ~(3u << sh)) | ((p & 3u) << sh));
+    } else {
+        vram[a] = lop(lopc, src, base);
+    }
+    x->cost += x->hs ? COST_READ_HS + COST_WRITE_HS : COST_ACCESS_SLOW * 2;
+
+    uint32_t next_nyb = ((uint32_t)c->nyb - c->reg_ny) & 0x1FFFu;
+    bool shift = (next_nyb & 0x800) != 0;
+    bool xhr = arg_xhr(x);
+    c->sx = ((uint32_t)c->reg_sx << 8) & 0xFFFFFu;
+    c->sx2 = (c->sx2 - sext16(c->vy, xhr ? 1 : 0)) & 0xFFFFFu;
+    c->sy2 = (c->sy2 + sext16(c->vx, xhr ? 1 : 0)) & 0x1FFFFFu;
+    if (!maj || shift) c->dx = (uint16_t)(((dix ? d - 1u : d + 1u) & 0x3FFu) & 0x1FF);
+    if (maj || shift)  c->dy = (uint16_t)(((diy ? y - 1u : y + 1u) & 0x1FFFu) & (x->v256 ? 0x7FFu : 0x3FFu));
+    if (c->bit_count == 0) c->font_addr = (c->font_addr + 1) & 0x3FFFFu;
+    c->nyb = (uint16_t)(shift ? ((next_nyb + c->reg_nx) & 0xFFF) : (next_nyb & 0xFFF));
+    finish(x, false);
+}
+
+/* The LINE pixels before its last one (NX = R#40) and away from the edges
+ * (DX or DY about to leave the screen, or DX past 255 in a 256-pixel mode):
+ * step_one does those and ends the command. In between, a pixel is
+ * conditions() without any end, put_pixel(), and the LINE parts of
+ * advance(): the error term NYB, DX on the major axis or a shift, DY on the
+ * minor one or a shift, NX, and SX stepping by one (from the integer part,
+ * as next_sx). */
+static inline __attribute__((always_inline))
+void line_pixels(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il) {
+    v9968_cmd_state_t *c = x->c;
+    const unsigned px_cost = x->hs ? COST_READ_HS + COST_WRITE_HS : COST_ACCESS_SLOW * 2;
+    if (x->cost >= budget) return;
+    uint32_t nx = c->nx, reg_nx = c->reg_nx;
+    if (nx > reg_nx) return;
+    if (nx == reg_nx) { line_last(x, budget, layout, bpp, il); return; }
+    uint32_t n = reg_nx - nx;
+    uint32_t nb = (budget - x->cost + px_cost - 1) / px_cost;
+    if (nb < n) n = nb;
+
+    const volatile uint32_t *watch = x->watch;
+    const uint32_t watch_val = x->watch_val;
+    uint32_t ymin = x->cost >= YIELD_MIN ? 0 : (YIELD_MIN - x->cost + px_cost - 1) / px_cost;
+    uint32_t ynext = ymin > 8 ? ymin : 8;
+
+    uint8_t *vram = x->v->vram;
+    const bool dix = arg_dix(c), diy = arg_diy(c), maj = arg_maj(c), wide = c->wide;
+    const uint32_t dlast = wide ? 511u : 255u;          /* DX + 1 overflows past it */
+    const uint32_t dy_mask = x->v256 ? 0x7FFu : 0x3FFu;
+    const uint32_t reg_ny = c->reg_ny;
+    const unsigned lopc = c->lop;
+    const uint8_t src = c->source;
+    const bool skip = (lopc & 8) && src == 0;           /* T-ops with colour 0 keep VRAM */
+    uint32_t d = c->dx, y = c->dy, nyb = c->nyb, i = 0;
+
+    /* A horizontal line (NY = 0 on the X axis, as geo3d fills faces): NYB
+     * never reaches bit 11, so only DX moves; with IMP (or a T-op on a
+     * colour other than 0) the run is a fill (256-pixel modes: FG4 in G6
+     * wraps its 512 pixels in 128-byte rows). */
+    if (!maj && reg_ny == 0 && (lopc & 7) == 0 && !skip && !il && !wide &&
+        ((layout == 0 && bpp == 4) || (layout == 3 && bpp == 8))) {
+        uint32_t room;
+        if (diy && y == 0) room = 0;                    /* dy_ovf on every pixel */
+        else if (dix) room = (!wide && d >= 256) ? 0 : d;
+        else room = d < dlast ? dlast - d : 0;
+        if (room < n) n = room;
+        if (n == 0) return;
+        uint32_t lo = dix ? d - (n - 1) : d, hi = lo + n - 1;
+        if (layout == 3) {
+            memset(vram + ((y & 0x3FFu) << 8 | lo), src, n);
+        } else {
+            uint8_t *row = vram + ((y & 0x7FFu) << 7);
+            uint8_t p = src & 0x0F;
+            if (lo & 1) { row[lo >> 1] = (uint8_t)((row[lo >> 1] & 0xF0) | p); lo++; }
+            if (lo <= hi && !(hi & 1)) { row[hi >> 1] = (uint8_t)((row[hi >> 1] & 0x0F) | (p << 4)); if (hi == 0) goto done; hi--; }
+            if (lo <= hi) memset(row + (lo >> 1), p * 0x11, (hi - lo + 1) >> 1);
+        }
+    done:
+        i = n;
+        d = dix ? d - n : d + n;
+        goto out;
+    }
+
+    while (i < n) {
+        /* dx_ovf, and step_one's DX >= 256 test in a 256-pixel mode */
+        if (dix ? (d == 0 || (!wide && d >= 256)) : d >= dlast) break;
+        if (diy && y == 0) break;                       /* dy_ovf */
+        if (!skip) {
+            uint32_t a;
+            if (layout == 0)      a = (y & 0x7FFu) << 7 | ((d >> 1) & 0x7Fu);
+            else if (layout == 1) a = (y & 0x7FFu) << 7 | ((d >> 2) & 0x7Fu);
+            else if (layout == 2) a = (y & 0x3FFu) << 8 | ((d >> 1) & 0xFFu);
+            else                  a = (y & 0x3FFu) << 8 | (d & 0xFFu);
+            a = v9968_phys(il, a);
+            uint8_t base = vram[a];
+            if (bpp == 4) {
+                uint8_t p = lop(lopc, src, (d & 1) ? (base & 0x0F) : (base >> 4));
+                vram[a] = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F))
+                                  : (uint8_t)((base & 0x0F) | (p << 4));
+            } else if (bpp == 2) {
+                unsigned sh = 6 - 2 * (d & 3);
+                uint8_t p = lop(lopc, src, (base >> sh) & 3);
+                vram[a] = (uint8_t)((base & ~(3u << sh)) | ((p & 3u) << sh));
+            } else {
+                vram[a] = lop(lopc, src, base);
+            }
+        }
+        uint32_t next_nyb = (nyb - reg_ny) & 0x1FFFu;
+        bool shift = (next_nyb & 0x800) != 0;
+        nyb = shift ? ((next_nyb + reg_nx) & 0xFFFu) : (next_nyb & 0xFFFu);
+        if (!maj || shift) d = dix ? d - 1 : d + 1;
+        if (maj || shift)  y = (diy ? y - 1 : y + 1) & dy_mask;
+        i++;
+        if (i >= ynext) {
+            ynext = i + 8;
+            if (watch && *watch != watch_val) break;
+        }
+    }
+out:
+    if (i == 0) return;
+    if (c->bit_count == 0) c->font_addr = (c->font_addr + i) & 0x3FFFFu;
+    uint32_t sxi = sx_int(c);
+    sxi = (dix ? sxi - i : sxi + i) & 0xFFFu;
+    c->sx = (sxi << 8) & 0xFFFFFu;
+    c->dx = (uint16_t)d;
+    c->dy = (uint16_t)y;
+    c->nyb = (uint16_t)nyb;
+    c->nx = (uint16_t)(nx + i);
+    x->cost += i * px_cost;
+    if (c->nx == reg_nx && !yield_now(x, x->cost)) line_last(x, budget, layout, bpp, il);
+}
+
+V9968_HOT static void line_g4(ctx_t *x, unsigned b) { line_pixels(x, b, 0, 4, false); }
+V9968_HOT static void line_g7(ctx_t *x, unsigned b) { line_pixels(x, b, 3, 8, false); }
+/* the other modes, and G7 interleaved (without sprite mode 3): the demos
+ * draw lines in G4 and in G7 with SP3 */
+V9968_HOT static void __attribute__((noinline)) line_any(ctx_t *x, unsigned b) {
+    unsigned layout = x->g4 ? 0 : x->g5 ? 1 : x->g6 ? 2 : 3;
+    line_pixels(x, b, layout, x->bpp, x->interleave);
+}
+
+V9968_HOT static void line_run(ctx_t *x, unsigned budget) {
+    if (x->g4 && x->bpp == 4 && !x->interleave) line_g4(x, budget);
+    else if (!x->g4 && !x->g5 && !x->g6 && x->bpp == 8 && !x->interleave) line_g7(x, budget);
+    else line_any(x, budget);
+}
+
 V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget) {
     if (v->cmd.state == ST_IDLE) return 0;
     ctx_t x;
@@ -984,6 +1175,7 @@ V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget) {
         if (v->cmd.state == ST_LRMM) lrmm_run(&x, budget);
         else if (v->cmd.state == ST_LMMM || (v->cmd.state == ST_HMMM && v->cmd.op == OP_HMMM))
             mm_run(&x, budget);
+        else if (v->cmd.state == ST_LINE) line_run(&x, budget);
     }
     while (v->cmd.state != ST_IDLE && x.cost < budget && !yield_now(&x, x.cost)) {
         if (!step_one(&x)) break;
@@ -992,13 +1184,23 @@ V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget) {
 }
 
 /* geo3d's issuer: R#36-R#46 (LINE) or R#32-R#50 (LRMM) whenever CE = 0. */
+/* geo3d's short commands follow one another within the budget, until a
+ * bus event waits (v9968_cmd_watch), rather than one per call. */
 V9968_HOT unsigned v9968_service(v9968_t *v, unsigned budget) {
     geo3d_t *g = v->geo;
-    if (g->running && v->cmd.state == ST_IDLE) {
-        uint8_t b[GEO3D_CMD_MAX];
-        unsigned n = geo3d_next_command(g, b);
-        if (n == 0) g->running = false;
-        for (unsigned k = 0; k < n; k++) v9968_cmd_write_reg(v, geo3d_command_reg(n, k), b[k]);
+    const volatile uint32_t *watch = v9968_cmd_watch;
+    const uint32_t watch_val = watch ? *watch : 0;
+    unsigned used = 0;
+    for (;;) {
+        if (g->running && v->cmd.state == ST_IDLE) {
+            uint8_t b[GEO3D_CMD_MAX];
+            unsigned n = geo3d_next_command(g, b);
+            if (n == 0) g->running = false;
+            if (n == 11 && geo3d_command_reg(n, 0) == 36) write_line_regs(v, b);
+            else for (unsigned k = 0; k < n; k++) v9968_cmd_write_reg(v, geo3d_command_reg(n, k), b[k]);
+        }
+        used += v9968_cmd_step(v, budget - used);
+        if (used >= budget || !g->running || v->cmd.state != ST_IDLE) return used;
+        if (watch && *watch != watch_val) return used;
     }
-    return v9968_cmd_step(v, budget);
 }

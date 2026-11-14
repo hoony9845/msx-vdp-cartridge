@@ -41,7 +41,10 @@ static void run_cmd(void) {
             }
             if (n) fputs("E\n", geo_log);
         }
-        if (!v9968_service(&vdp, 1u << 20) && !vdp.geo->running) break;
+        /* logging issues geo3d's commands above, one at a time (v9968_service
+         * would run several per call) */
+        unsigned used = geo_log ? v9968_cmd_step(&vdp, 1u << 20) : v9968_service(&vdp, 1u << 20);
+        if (!used && !vdp.geo->running) break;
     }
 }
 
