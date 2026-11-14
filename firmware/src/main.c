@@ -176,13 +176,15 @@ void main_dump(void) {
 /* LRMM speed: a 128x128 copy of the top-left corner onto itself (VX = 1,
  * VY = 0, so VRAM keeps its contents) on a copy of the VDP state, in G4
  * (r0 = 06h) or FG4 in G7 (r0 = 0Eh, ARG bit 7), with the command engine
- * held. Results in ns per pixel; the cartridge takes ~140 (12 clocks). */
+ * held; FG4 with sprite mode 3 like LUMEN/FORGE (no G7 interleave). Results
+ * in ns per pixel; the cartridge takes ~140 (12 clocks). */
 #define BENCH_LRMM_PX (128u * 128u)
 
 static void bench_lrmm_start(uint8_t r0, uint8_t arg) {
     v9968_t *b = &bench_v9968;
     b->regs[0] = r0;
-    b->regs[20] = (uint8_t)((b->regs[20] & ~0x08) | 0x01);   /* HS, no SP3 */
+    b->regs[20] = (uint8_t)((b->regs[20] & ~0x08) | 0x01 |   /* HS */
+                            ((arg & 0x80) ? 0x08 : 0));         /* SP3 with FG4 */
     b->regs[21] = 0;                                           /* V9968 mode */
     b->geo.running = false;
     static const uint8_t r[][2] = {

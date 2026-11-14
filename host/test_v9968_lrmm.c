@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
             wr(49, (uint8_t)vy); wr(50, (uint8_t)(vy >> 8));
         }
         wr(45, (uint8_t)rnd());                          /* DIX/DIY/XHR/FG4 ... */
-        wr(46, (uint8_t)(0x30 | (rnd() & 0x0F)));
+        wr(46, (uint8_t)(0x30 | ((rnd() & 1) ? 0 : (rnd() & 0x0F))));   /* IMP half the time */
 
         /* the first destination bytes (layout as G4/G7 without interleave) */
         unsigned dxw = vb.cmd.reg_dx, dyw = vb.cmd.dy;

@@ -670,10 +670,36 @@ static bool step_one(ctx_t *x) {
  * screen): only SX/SY/DX/NX and the bit counter move, so this does what
  * step_one would, without the general conditions()/advance(). It stops
  * before the row's last pixel, which step_one does (it starts the next row
- * or ends the command), or where the budget runs out. The template
- * parameters are constants in each copy below. */
+ * or ends the command), where the budget runs out, or when the bus needs
+ * core1 (yield_now). The template parameters are constants in each copy
+ * below; `imp` is LOP = IMP, where the destination is not read (and two
+ * pixels of a byte are written at once: G4 nibbles, or FG4 in an 8-bit mode,
+ * where both write the whole byte). The window must not be empty
+ * (WEX >= WSX, WEY >= WSY), so that it can be tested with two unsigned
+ * compares. */
 static inline __attribute__((always_inline))
-void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, bool xhr) {
+uint8_t lrmm_src(const uint8_t *vram, uint32_t sx, uint32_t sy, unsigned layout, unsigned bpp,
+                 bool il, bool xhr, int32_t wsx, uint32_t wxr, int32_t wsy, uint32_t wyr,
+                 uint8_t color) {
+    uint32_t syw = xhr ? ((uint32_t)(sext(sy, 21) >> 1) & 0x1FFFFFu) : sy;
+    int32_t ix = sext((sx >> 8) & 0xFFFu, 12);
+    int32_t iy = sext((syw >> 8) & 0x1FFFu, 13);
+    if ((uint32_t)(ix - wsx) > wxr || (uint32_t)(iy - wsy) > wyr) return color;
+    uint32_t a;
+    if (layout == 0)      a = ((syw >> 8) & 0x7FFu) << 7 | ((sx >> 9) & 0x7Fu);
+    else if (layout == 1) a = ((syw >> 8) & 0x7FFu) << 7 | ((sx >> 10) & 0x7Fu);
+    else if (layout == 2) a = ((syw >> 8) & 0x3FFu) << 8 | ((sx >> 9) & 0xFFu);
+    else                  a = ((syw >> 8) & 0x3FFu) << 8 | ((sx >> 8) & 0xFFu);
+    uint8_t b = vram[v9968_phys(il, a)];
+    unsigned xs = (sx >> 8) & 3u;
+    if (bpp == 4)      return (xs & 1) ? (b & 0x0F) : (b >> 4);
+    else if (bpp == 2) return (b >> (6 - 2 * xs)) & 3;
+    else               return b;
+}
+
+static inline __attribute__((always_inline))
+void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, bool xhr,
+              bool imp) {
     v9968_cmd_state_t *c = x->c;
     const unsigned px_cost = x->hs ? COST_READ_HS * 2 + COST_WRITE_HS : COST_ACCESS_SLOW * 3;
     if (x->cost >= budget) return;
@@ -692,14 +718,23 @@ void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il,
     if (nb < n) n = nb;
     if (n == 0) return;
 
+    /* pixels before a bus event may stop it, and what to watch */
+    const volatile uint32_t *watch = x->watch;
+    const uint32_t watch_val = x->watch_val;
+    uint32_t ymin = x->cost >= YIELD_MIN ? 0 : (YIELD_MIN - x->cost + px_cost - 1) / px_cost;
+    uint32_t ynext = ymin > 4 ? ymin : 4;
+
     uint8_t *vram = x->v->vram;
     uint32_t sx = c->sx, sy = c->sy;
     const uint32_t vx = (uint32_t)(int32_t)(int16_t)c->vx;
     const uint32_t vy = (uint32_t)(int32_t)(int16_t)c->vy;
-    const int32_t wsx = c->wsx, wsy = c->wsy, wex = c->wex, wey = c->wey;
+    const int32_t wsx = c->wsx, wsy = c->wsy;
+    const uint32_t wxr = (uint32_t)(c->wex - c->wsx), wyr = (uint32_t)(c->wey - c->wsy);
     const unsigned lopc = c->lop;
     const uint8_t color = c->color;
     const int32_t dstep = dix ? -1 : 1;
+#define SRC() lrmm_src(vram, sx, sy, layout, bpp, il, xhr, wsx, wxr, wsy, wyr, color)
+#define STEP() do { sx = (sx + vx) & 0xFFFFFu; sy = (sy + vy) & 0x1FFFFFu; } while (0)
 
     /* destination row (DY does not change inside a row) */
     uint32_t dy = c->dy, drow;
@@ -708,55 +743,62 @@ void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il,
 
     uint32_t d = dx, i = 0;
     while (i < n) {
-        /* source pixel, or the colour outside the window */
-        uint32_t syw = xhr ? ((uint32_t)(sext(sy, 21) >> 1) & 0x1FFFFFu) : sy;
-        int32_t ix = sext((sx >> 8) & 0xFFFu, 12);
-        int32_t iy = sext((syw >> 8) & 0x1FFFu, 13);
-        uint8_t src;
-        if (ix < wsx || iy < wsy || ix > wex || iy > wey) {
-            src = color;
-        } else {
-            uint32_t a;
-            if (layout == 0)      a = ((syw >> 8) & 0x7FFu) << 7 | ((sx >> 9) & 0x7Fu);
-            else if (layout == 1) a = ((syw >> 8) & 0x7FFu) << 7 | ((sx >> 10) & 0x7Fu);
-            else if (layout == 2) a = ((syw >> 8) & 0x3FFu) << 8 | ((sx >> 9) & 0xFFu);
-            else                  a = ((syw >> 8) & 0x3FFu) << 8 | ((sx >> 8) & 0xFFu);
-            uint8_t b = vram[v9968_phys(il, a)];
-            unsigned xs = (sx >> 8) & 3u;
-            if (bpp == 4)      src = (xs & 1) ? (b & 0x0F) : (b >> 4);
-            else if (bpp == 2) src = (b >> (6 - 2 * xs)) & 3;
-            else               src = b;
-        }
-
-        /* read-modify-write of the destination */
         uint32_t da;
         if (layout == 0)      da = drow | ((d >> 1) & 0x7Fu);
         else if (layout == 1) da = drow | ((d >> 2) & 0x7Fu);
         else if (layout == 2) da = drow | ((d >> 1) & 0xFFu);
         else                  da = drow | (d & 0xFFu);
         da = v9968_phys(il, da);
-        uint8_t base = vram[da];
-        uint8_t out;
-        if (bpp == 4) {
-            uint8_t dp = (d & 1) ? (base & 0x0F) : (base >> 4);
-            uint8_t p = lop(lopc, src, dp);
-            out = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F))
-                          : (uint8_t)((base & 0x0F) | (p << 4));
-        } else if (bpp == 2) {
-            unsigned sh = 6 - 2 * (d & 3);
-            uint8_t p = lop(lopc, src, (base >> sh) & 3);
-            out = (uint8_t)((base & ~(3u << sh)) | ((p & 3u) << sh));
-        } else {
-            out = lop(lopc, src, base);
-        }
-        vram[da] = out;
 
-        sx = (sx + vx) & 0xFFFFFu;
-        sy = (sy + vy) & 0x1FFFFFu;
-        d = (uint32_t)((int32_t)d + dstep);
-        i++;
-        if ((i & 3) == 0 && yield_now(x, x->cost + i * px_cost)) break;
+        if (imp && bpp == 4 && !dix && !(d & 1) && i + 1 < n) {
+            /* both pixels of the byte */
+            uint8_t p0 = SRC();
+            STEP();
+            uint8_t p1 = SRC();
+            STEP();
+            vram[da] = (uint8_t)((p0 << 4) | (p1 & 0x0F));
+            d += 2;
+            i += 2;
+        } else if (imp && bpp == 8 && layout == 0 && !dix && !(d & 1) && i + 1 < n) {
+            /* FG4: both pixels write the whole byte, the second one stays */
+            STEP();
+            vram[da] = SRC();
+            STEP();
+            d += 2;
+            i += 2;
+        } else {
+            uint8_t src = SRC();
+            uint8_t out;
+            if (imp && bpp == 8) {
+                out = src;
+            } else {
+                uint8_t base = vram[da];
+                unsigned op = imp ? 0 : lopc;
+                if (bpp == 4) {
+                    uint8_t dp = (d & 1) ? (base & 0x0F) : (base >> 4);
+                    uint8_t p = lop(op, src, dp);
+                    out = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F))
+                                  : (uint8_t)((base & 0x0F) | (p << 4));
+                } else if (bpp == 2) {
+                    unsigned sh = 6 - 2 * (d & 3);
+                    uint8_t p = lop(op, src, (base >> sh) & 3);
+                    out = (uint8_t)((base & ~(3u << sh)) | ((p & 3u) << sh));
+                } else {
+                    out = lop(op, src, base);
+                }
+            }
+            vram[da] = out;
+            STEP();
+            d = (uint32_t)((int32_t)d + dstep);
+            i++;
+        }
+        if (i >= ynext) {
+            ynext = i + 4;
+            if (watch && *watch != watch_val) break;
+        }
     }
+#undef SRC
+#undef STEP
     n = i;
 
     /* the rest of advance() for n pixels: the bit counter steps the LFMM
@@ -770,25 +812,30 @@ void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il,
     x->cost += n * px_cost;
 }
 
-/* The copies for the screen modes LRMM is used in; the rest run the
+/* The copies for the screen modes and LOP the demos use; the rest run the
  * general one. */
-V9968_HOT static void lrmm_g4(ctx_t *x, unsigned b)     { lrmm_row(x, b, 0, 4, false, false); }
-V9968_HOT static void lrmm_fg4(ctx_t *x, unsigned b)    { lrmm_row(x, b, 0, 8, false, false); }
-V9968_HOT static void lrmm_g7(ctx_t *x, unsigned b)     { lrmm_row(x, b, 3, 8, false, false); }
-V9968_HOT static void lrmm_g7_il(ctx_t *x, unsigned b)  { lrmm_row(x, b, 3, 8, true, false); }
+V9968_HOT static void lrmm_g4(ctx_t *x, unsigned b)     { lrmm_row(x, b, 0, 4, false, false, true); }
+V9968_HOT static void lrmm_fg4(ctx_t *x, unsigned b)    { lrmm_row(x, b, 0, 8, false, false, true); }
+V9968_HOT static void lrmm_g7(ctx_t *x, unsigned b)     { lrmm_row(x, b, 3, 8, false, false, true); }
+V9968_HOT static void lrmm_g7_il(ctx_t *x, unsigned b)  { lrmm_row(x, b, 3, 8, true, false, true); }
 V9968_HOT static void __attribute__((noinline))
 lrmm_any(ctx_t *x, unsigned b, unsigned layout, bool il, bool xhr) {
-    lrmm_row(x, b, layout, x->bpp, il, xhr);
+    lrmm_row(x, b, layout, x->bpp, il, xhr, false);
 }
 
 V9968_HOT static void lrmm_run(ctx_t *x, unsigned budget) {
+    v9968_cmd_state_t *c = x->c;
+    /* an empty window: every pixel is outside, step_one does them */
+    if (c->wex < c->wsx || c->wey < c->wsy) return;
     unsigned layout = x->g4 ? 0 : x->g5 ? 1 : x->g6 ? 2 : 3;
     bool il = x->interleave, xhr = arg_xhr(x);
     void (*fast)(ctx_t *, unsigned) = NULL;
-    if (!xhr && !il && layout == 0) fast = x->bpp == 4 ? lrmm_g4 : x->bpp == 8 ? lrmm_fg4 : NULL;
-    else if (!xhr && layout == 3 && x->bpp == 8) fast = il ? lrmm_g7_il : lrmm_g7;
+    if (c->lop == 0 && !xhr) {
+        if (!il && layout == 0) fast = x->bpp == 4 ? lrmm_g4 : x->bpp == 8 ? lrmm_fg4 : NULL;
+        else if (layout == 3 && x->bpp == 8) fast = il ? lrmm_g7_il : lrmm_g7;
+    }
 
-    while (x->c->state == ST_LRMM && x->cost < budget) {
+    while (c->state == ST_LRMM && x->cost < budget) {
         if (fast) fast(x, budget);
         else      lrmm_any(x, budget, layout, il, xhr);
         if (x->cost >= budget || yield_now(x, x->cost)) break;
