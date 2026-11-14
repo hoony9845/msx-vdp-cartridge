@@ -73,7 +73,12 @@ typedef struct {
     uint16_t next_item;             /* edge k, or index into vis[] */
     uint16_t nvis;
     int32_t  row, row_end;          /* face spans: current/last row */
+    int32_t  fx[4], fy[4];          /* the current face's projected corners */
     geo3d_vis_t vis[GEO3D_NMEM];
+    /* wireframe RUN: the edges to draw, clipped once by the RUN (the Z80
+     * must not write the model while the RUN is busy) */
+    int16_t  seg[GEO3D_NMEM][4];
+    uint16_t nseg;
 } geo3d_t;
 
 void geo3d_reset(geo3d_t *g);

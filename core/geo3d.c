@@ -12,8 +12,15 @@ static inline int64_t sat64(int64_t v, int64_t lo, int64_t hi) {
     return v < lo ? lo : v > hi ? hi : v;
 }
 
-/* Python's a // b (b != 0) */
+/* Python's a // b (b != 0); in 32 bits when both fit (the M33 divides
+ * those in hardware, 64-bit division is a library call) */
 static inline int64_t floor_div(int64_t a, int64_t b) {
+    if (a == (int32_t)a && b == (int32_t)b && a != INT32_MIN) {
+        int32_t a32 = (int32_t)a, b32 = (int32_t)b;
+        int32_t q32 = a32 / b32;
+        if ((a32 % b32 != 0) && ((a32 < 0) != (b32 < 0))) q32--;
+        return q32;
+    }
     int64_t q = a / b;
     if ((a % b != 0) && ((a < 0) != (b < 0))) q--;
     return q;
@@ -190,7 +197,11 @@ static void face_rows(geo3d_t *g, const geo3d_vis_t *vis) {
     const geo3d_face_t *f = &g->fmem[vis->face];
     int32_t ymin = 32767, ymax = -32768;
     for (int k = 0; k < 4; k++) {
-        int32_t y = g->pmem[f->idx[k] & MEM_MASK].sy;
+        g->fx[k] = g->pmem[f->idx[k] & MEM_MASK].sx;
+        g->fy[k] = g->pmem[f->idx[k] & MEM_MASK].sy;
+    }
+    for (int k = 0; k < 4; k++) {
+        int32_t y = g->fy[k];
         if (y < ymin) ymin = y;
         if (y > ymax) ymax = y;
     }
@@ -205,10 +216,50 @@ static void cand(cand_t *l, cand_t *r, int64_t x, int64_t u, int64_t v) {
     if (!r->set || x > r->x) { r->x = x; r->u = u; r->v = v; r->set = true; }
 }
 
+/* face_span without a texture: only the leftmost and rightmost edge
+ * crossings, from the corners face_rows() took (the same arithmetic) */
+static unsigned flat_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, uint8_t *b) {
+    const int32_t *xs = g->fx, *ys = g->fy;
+    int32_t xl = 0, xr = 0;
+    bool set = false;
+    for (int k = 0; k < 4; k++) {
+        int a = k, c = (k + 1) & 3;
+        int32_t ya = ys[a], yc = ys[c], x0, x1;
+        if (ya == yc) {
+            if (y != ya) continue;
+            x0 = xs[a];
+            x1 = xs[c];
+            if (x0 > x1) { int32_t t = x0; x0 = x1; x1 = t; }
+        } else {
+            int32_t lo = ya < yc ? ya : yc, hi = ya < yc ? yc : ya;
+            if (y < lo || y > hi) continue;
+            int32_t dy = y - ya, den = yc - ya;
+            x0 = x1 = xs[a] + (int32_t)floor_div((int64_t)dy * (xs[c] - xs[a]), den);
+        }
+        if (!set || x0 < xl) xl = x0;
+        if (!set || x1 > xr) xr = x1;
+        set = true;
+    }
+    if (!set) return 0;
+    int32_t w = g->cfg[16];
+    int32_t cl = xl > 0 ? xl : 0, cr = xr < w - 1 ? xr : w - 1;
+    if (cl > cr) return 0;
+    unsigned dy = (unsigned)((y + g->ypage) & 0x7FF);
+    int32_t nx = cr - cl;
+    b[0] = (uint8_t)cl;  b[1] = (uint8_t)((cl >> 8) & 1);
+    b[2] = (uint8_t)dy;  b[3] = (uint8_t)(dy >> 8);
+    b[4] = (uint8_t)nx;  b[5] = (uint8_t)((nx >> 8) & 7);
+    b[6] = 0;            b[7] = 0;
+    b[8] = vis->color;   b[9] = 0;
+    b[10] = (uint8_t)(0x70 | (g->lop & 0xF));
+    return 11;
+}
+
 /* The span of one row of a face; returns the command length or 0. */
 static unsigned face_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, uint8_t *b) {
     const geo3d_face_t *f = &g->fmem[vis->face];
     bool textured = g->textured && (f->base & 0x80);
+    if (!textured) return flat_span(g, vis, y, b);
     const uint8_t *uv = g->tmem[vis->face];
     int64_t xs[4], ys[4], us[4], vs[4];
     for (int k = 0; k < 4; k++) {
@@ -301,11 +352,16 @@ static void run(geo3d_t *g, uint8_t ctrl) {
         if (g->nvis) face_rows(g, &g->vis[0]);
     } else {
         int32_t seg[4];
+        g->nseg = 0;
         for (unsigned k = 0; k < g->nedge; k++) {
             switch (classify_edge(g, k, seg)) {
             case CLIP_SKIP: g->cnt_skip++; break;
             case CLIP_CULL: g->cnt_cull++; break;
-            default:        g->cnt_draw++; break;
+            default:
+                g->cnt_draw++;
+                for (int i = 0; i < 4; i++) g->seg[g->nseg][i] = (int16_t)seg[i];
+                g->nseg++;
+                break;
             }
         }
     }
@@ -315,12 +371,10 @@ static void run(geo3d_t *g, uint8_t ctrl) {
 unsigned geo3d_next_command(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX]) {
     if (!g->running) return 0;
     if (!g->faces) {
-        int32_t seg[4];
-        while (g->next_item < g->nedge) {
-            unsigned k = g->next_item++;
-            if (classify_edge(g, k, seg) == CLIP_DRAW) return line_bytes(g, seg, bytes);
-        }
-        return 0;
+        if (g->next_item >= g->nseg) return 0;
+        const int16_t *s = g->seg[g->next_item++];
+        int32_t seg[4] = { s[0], s[1], s[2], s[3] };
+        return line_bytes(g, seg, bytes);
     }
     while (g->next_item < g->nvis) {
         const geo3d_vis_t *vis = &g->vis[g->next_item];
