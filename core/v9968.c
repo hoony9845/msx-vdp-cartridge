@@ -252,14 +252,17 @@ static uint8_t status_peek(const v9968_t *v) {
     }
 }
 
-static void status_read(v9968_t *v) {
+/* `seen` is the value the CPU got: only the flags it saw are cleared, as
+ * the video side may set one between that value and this call (a lost F
+ * skipped MIST VALE's frame interrupt, leaving its water scroll on). */
+static void status_read(v9968_t *v, uint8_t seen) {
     switch (v->regs[15]) {
     case 0:
-        V9968_CLR_BITS(v->int_flags, V9968_INT_FRAME);
-        V9968_CLR_BITS(v->sprite_status, V9968_S0_5S | V9968_S0_C);
+        if (seen & 0x80) V9968_CLR_BITS(v->int_flags, V9968_INT_FRAME);
+        V9968_CLR_BITS(v->sprite_status, seen & (V9968_S0_5S | V9968_S0_C));
         break;
     case 1:
-        V9968_CLR_BITS(v->int_flags, V9968_INT_LINE);
+        if (seen & 1) V9968_CLR_BITS(v->int_flags, V9968_INT_LINE);
         break;
 #if !(defined(PICO_ON_DEVICE) && PICO_ON_DEVICE)
     case 2:
@@ -346,7 +349,10 @@ V9968_HOT uint8_t v9968_peek_port(const v9968_t *v, uint8_t port) {
 }
 
 V9968_HOT uint8_t v9968_read_port(v9968_t *v, uint8_t port) {
-    uint8_t value = v9968_peek_port(v, port);
+    return v9968_read_port_seen(v, port, v9968_peek_port(v, port));
+}
+
+V9968_HOT uint8_t v9968_read_port_seen(v9968_t *v, uint8_t port, uint8_t value) {
     switch (port & 7) {
     case V9968_PORT_VRAM:
         v->second = false;
@@ -354,7 +360,7 @@ V9968_HOT uint8_t v9968_read_port(v9968_t *v, uint8_t port) {
         break;
     case V9968_PORT_CTRL:
         v->second = false;
-        status_read(v);
+        status_read(v, value);
         break;
     case V9968_PORT_GEO_DATA:
         geo3d_read_data(&v->geo);

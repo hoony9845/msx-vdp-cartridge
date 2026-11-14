@@ -296,10 +296,12 @@ static void __not_in_flash_func(loop_v9968)(void) {
             tail = (tail + 1u) & (RING_WORDS - 1u);
             stat_event(ev);
             uint8_t port = (ev >> 1) & 0x0F;
+            /* the value the read SM sends: read_table is written on this core only */
+            uint8_t seen = (uint8_t)read_table[port];
             if (ev & 1u) ordered_read();
             if (port >= V9968_BLOCK) {
                 if (ev & 1u)
-                    (void)v9968_read_port(v9968, port - V9968_BLOCK);
+                    (void)v9968_read_port_seen(v9968, port - V9968_BLOCK, seen);
                 else {
                     /* A geo3d RUN transforms and classifies the whole model
                      * before it reports busy, and the CPU reads the status

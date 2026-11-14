@@ -156,6 +156,8 @@ void v9968_reset(v9968_t *v);
 /* ---- bus interface (port = offset 0..7 in the cartridge block) ---- */
 V9968_HOT void    v9968_write_port(v9968_t *v, uint8_t port, uint8_t data);
 V9968_HOT uint8_t v9968_read_port(v9968_t *v, uint8_t port);
+/* a read the CPU was answered with `value` (the firmware's read table) */
+V9968_HOT uint8_t v9968_read_port_seen(v9968_t *v, uint8_t port, uint8_t value);
 V9968_HOT uint8_t v9968_peek_port(const v9968_t *v, uint8_t port);
 
 static inline bool v9968_irq_pending(const v9968_t *v) {
