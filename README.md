@@ -9,6 +9,8 @@ MSX 실기기에서 **V9990(GFX9000)과 V9968을 가장 저렴하게 경험**해
 | MSX 실기 동작 | Geo3D 테스트 (V9968 + geo3d) |
 |---|---|
 | [![MSX 실기에서 동작하는 모습 (YouTube)](https://img.youtube.com/vi/r0W5C8UGfvY/hqdefault.jpg)](https://youtu.be/r0W5C8UGfvY) | [![Geo3D 테스트 (YouTube)](https://img.youtube.com/vi/VtkUM869Wkc/hqdefault.jpg)](https://youtu.be/VtkUM869Wkc) |
+| **Geo3D - 최적화 중** | **V9968 - 최적화 중** |
+| [![Geo3D - 최적화 중 (YouTube)](https://img.youtube.com/vi/hxUfOGo3M_U/hqdefault.jpg)](https://youtu.be/hxUfOGo3M_U) | [![V9968 - 최적화 중 (YouTube)](https://img.youtube.com/vi/RDDwJzs-Vh0/hqdefault.jpg)](https://youtu.be/RDDwJzs-Vh0) |
 
 > **주의: 에뮬레이터다.** 실제 칩이 아니라 소프트웨어로 VDP 동작을 흉내 낸다.
 > V9990은 Yamaha 매뉴얼과 openMSX 동작을, V9968은 HRA!의 RTL을 기준으로 맞췄지만,
@@ -206,6 +208,8 @@ and the picture goes out over HDMI (DVI 640×480@60). In V9990 mode it uses I/O 
 | On a real MSX | Geo3D test (V9968 + geo3d) |
 |---|---|
 | [![Running on a real MSX (YouTube)](https://img.youtube.com/vi/r0W5C8UGfvY/hqdefault.jpg)](https://youtu.be/r0W5C8UGfvY) | [![Geo3D test (YouTube)](https://img.youtube.com/vi/VtkUM869Wkc/hqdefault.jpg)](https://youtu.be/VtkUM869Wkc) |
+| **Geo3D - optimisation in progress** | **V9968 - optimisation in progress** |
+| [![Geo3D - optimisation in progress (YouTube)](https://img.youtube.com/vi/hxUfOGo3M_U/hqdefault.jpg)](https://youtu.be/hxUfOGo3M_U) | [![V9968 - optimisation in progress (YouTube)](https://img.youtube.com/vi/RDDwJzs-Vh0/hqdefault.jpg)](https://youtu.be/RDDwJzs-Vh0) |
 
 > **Note: this is an emulator.** The VDP is imitated in software, not built as a chip.
 > The V9990 follows the Yamaha manual and openMSX's behaviour, the V9968 follows HRA!'s RTL,
