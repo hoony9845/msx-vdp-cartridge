@@ -36,6 +36,7 @@
 static vdp_chip_t chip;
 static v9990_t v9990;
 static v9968_t v9968;
+static geo3d_t v9968_geo;
 /* 256KB of SRAM: the V9968's VRAM, or VRAM0 (physical 0x00000-0x3FFFF) of
  * the V9990, whose VRAM1 is in PSRAM. Half of all V9990 VRAM traffic, and
  * the P1 layer A patterns and sprites, then skip the PSRAM. */
@@ -199,7 +200,6 @@ static void bench_lrmm_start(uint8_t r0, uint8_t arg) {
     b->regs[20] = (uint8_t)((b->regs[20] & ~0x08) | 0x01 |   /* HS */
                             ((arg & 0x80) ? 0x08 : 0));         /* SP3 with FG4 */
     b->regs[21] = 0;                                           /* V9968 mode */
-    b->geo.running = false;
     static const uint8_t r[][2] = {
         {32, 0}, {33, 0}, {34, 0}, {35, 0}, {36, 0}, {37, 0}, {38, 0}, {39, 0},
         {40, 128}, {41, 0}, {42, 128}, {43, 0}, {47, 0}, {48, 1}, {49, 0}, {50, 0},
@@ -220,7 +220,8 @@ static uint32_t __not_in_flash_func(bench_lrmm)(uint8_t r0, uint8_t arg, unsigne
     v9968_cmd_reference = ref;
     uint32_t t0 = timer_hw->timerawl;
     if (chunk == 0) v9968_cmd_step(&bench_v9968, 1u << 30);
-    else while (v9968_cmd_busy(&bench_v9968)) v9968_service(&bench_v9968, chunk);
+    /* (not v9968_service: the copy shares geo3d with the running VDP) */
+    else while (v9968_cmd_busy(&bench_v9968)) v9968_cmd_step(&bench_v9968, chunk);
     uint32_t t = timer_hw->timerawl - t0;
     v9968_cmd_reference = false;
     v9968_cmd_watch = w;
@@ -437,7 +438,7 @@ int main(void) {
 #endif
 
     if (chip == VDP_CHIP_V9968) {
-        v9968_init(&v9968, v9968_vram);
+        v9968_init(&v9968, v9968_vram, &v9968_geo);
         bus_init(chip, &v9968);
         video = (dvi_vdp_t){ &v9968, v9968_height, v9968_vbs, v9968_vbe, v9968_line,
                              v9968_hblank, true };

@@ -31,8 +31,9 @@ int main(int argc, char **argv) {
     static const uint8_t mode_r0[4] = { 0x06, 0x08, 0x0A, 0x0E };   /* G4 G5 G6 G7 */
     unsigned long pixels = 0, yields = 0;
 
-    v9968_init(&va, vram_a);
-    v9968_init(&vb, vram_b);
+    static geo3d_t geo_a, geo_b;
+    v9968_init(&va, vram_a, &geo_a);
+    v9968_init(&vb, vram_b, &geo_b);
     for (unsigned i = 0; i < V9968_VRAM_SIZE; i++) vram_a[i] = (uint8_t)rnd();
 
     for (unsigned n = 0; n < count; n++) {

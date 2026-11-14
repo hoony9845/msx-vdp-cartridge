@@ -993,7 +993,7 @@ V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget) {
 
 /* geo3d's issuer: R#36-R#46 (LINE) or R#32-R#50 (LRMM) whenever CE = 0. */
 V9968_HOT unsigned v9968_service(v9968_t *v, unsigned budget) {
-    geo3d_t *g = &v->geo;
+    geo3d_t *g = v->geo;
     if (g->running && v->cmd.state == ST_IDLE) {
         uint8_t b[GEO3D_CMD_MAX];
         unsigned n = geo3d_next_command(g, b);

@@ -19,7 +19,8 @@ static uint8_t vram[V9968_VRAM_SIZE];
 static v9968_t vdp;
 
 static void setup(void) {
-    v9968_init(&vdp, vram);
+    static geo3d_t geo;
+    v9968_init(&vdp, vram, &geo);
     vdp.gamma = false;
 }
 

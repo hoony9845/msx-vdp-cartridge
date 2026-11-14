@@ -321,7 +321,7 @@ static void __not_in_flash_func(loop_v9968)(void) {
         credit += (int32_t)((now - last_us) * V9968_CLK_PER_US);
         last_us = now;
         if (credit > (int32_t)V9968_SLICE) credit = V9968_SLICE;
-        if (credit > 0 && !bus_cmd_hold && (v9968_cmd_busy(v9968) || v9968->geo.running)) {
+        if (credit > 0 && !bus_cmd_hold && (v9968_cmd_busy(v9968) || v9968->geo->running)) {
             /* Back to the bus as soon as an event waits: the engine watches
              * the ring (v9968_cmd_watch) and stops within ~32 clocks
              * once one came in, so a read held on /WAIT is not kept
@@ -339,7 +339,7 @@ static void __not_in_flash_func(loop_v9968)(void) {
             read_table[V9968_BLOCK + V9968_PORT_CTRL] = v9968_peek_port(v9968, V9968_PORT_CTRL);
             read_table[V9968_BLOCK + V9968_PORT_INT] = v9968_peek_port(v9968, V9968_PORT_INT);
         }
-        if (!v9968_cmd_busy(v9968) && !v9968->geo.running && credit > 0) credit = 0;
+        if (!v9968_cmd_busy(v9968) && !v9968->geo->running && credit > 0) credit = 0;
 
         gpio_put(PIN_INT, !v9968_irq_pending(v9968));
 

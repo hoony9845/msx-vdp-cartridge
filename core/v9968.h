@@ -138,7 +138,6 @@ typedef struct v9968 {
     volatile uint8_t video_status;  /* S#2 VR/HR/EO, written by the video side */
 
     v9968_cmd_state_t cmd;
-    geo3d_t  geo;
 
     /* video timing state (core0) */
     volatile uint16_t cur_line;    /* display line being rendered */
@@ -147,10 +146,12 @@ typedef struct v9968 {
     bool     blink_page;           /* ff_interleaving_page (1 = "on" period) */
     uint8_t  shuffle_start;        /* sprite priority shuffle (R#25 SPS) */
     bool     hr_toggle;            /* host builds: HR flips on every S#2 read */
+
+    geo3d_t *geo;                  /* the caller's (~45KB, so copies of the state stay small) */
 } v9968_t;
 
 /* ---- lifecycle ---- */
-void v9968_init(v9968_t *v, uint8_t *vram);
+void v9968_init(v9968_t *v, uint8_t *vram, geo3d_t *geo);
 void v9968_reset(v9968_t *v);
 
 /* ---- bus interface (port = offset 0..7 in the cartridge block) ---- */

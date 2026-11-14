@@ -63,7 +63,7 @@ static inline void screen8(v9968_t *v) {
 /* Run commands (and geo3d) until done or waiting for the CPU. */
 static inline void run9968(v9968_t *v) {
     for (int i = 0; i < 1000000; i++) {
-        if (!v9968_service(v, 1u << 20) && !v->geo.running) break;
+        if (!v9968_service(v, 1u << 20) && !v->geo->running) break;
     }
 }
 

@@ -22,9 +22,10 @@ static void set_palette(v9968_t *v, unsigned i, unsigned r, unsigned g, unsigned
     v->pal_gen++;
 }
 
-void v9968_init(v9968_t *v, uint8_t *vram) {
+void v9968_init(v9968_t *v, uint8_t *vram, geo3d_t *geo) {
     memset(v, 0, sizeof(*v));
     v->vram = vram;
+    v->geo = geo;
     v->gamma = true;
     memset(vram, 0, V9968_VRAM_SIZE);
     v9968_reset(v);
@@ -32,10 +33,12 @@ void v9968_init(v9968_t *v, uint8_t *vram) {
 
 void v9968_reset(v9968_t *v) {
     uint8_t *vram = v->vram;
+    geo3d_t *geo = v->geo;
     bool gamma = v->gamma, rtl_lmcm = v->cmd.rtl_lmcm;
     uint32_t pal_gen = v->pal_gen;      /* keeps counting: renderer caches */
     memset(v, 0, sizeof(*v));
     v->vram = vram;
+    v->geo = geo;
     v->gamma = gamma;
     v->pal_gen = pal_gen + 1u;
     v->cmd.rtl_lmcm = rtl_lmcm;
@@ -50,7 +53,7 @@ void v9968_reset(v9968_t *v) {
         const uint8_t *c = default_palette[i & 15];
         set_palette(v, i, expand3(c[0]), expand3(c[1]), expand3(c[2]));
     }
-    geo3d_reset(&v->geo);
+    geo3d_reset(v->geo);
 }
 
 /* ------------------------------------------------------------------ */
@@ -326,10 +329,10 @@ V9968_HOT void v9968_write_port(v9968_t *v, uint8_t port, uint8_t data) {
         v->lock_ext = (data & 0x80) != 0;
         break;
     case V9968_PORT_GEO_INDEX:
-        geo3d_write(&v->geo, 0, data);
+        geo3d_write(v->geo, 0, data);
         break;
     case V9968_PORT_GEO_DATA:
-        geo3d_write(&v->geo, 1, data);
+        geo3d_write(v->geo, 1, data);
         break;
     default:
         break;
@@ -342,8 +345,8 @@ V9968_HOT uint8_t v9968_peek_port(const v9968_t *v, uint8_t port) {
     case V9968_PORT_CTRL:      return status_peek(v);
     case V9968_PORT_INT:
         return (uint8_t)((v->lock_ext ? 0x80 : 0) | (v->int_flags & 7));
-    case V9968_PORT_GEO_INDEX: return geo3d_status(&v->geo);
-    case V9968_PORT_GEO_DATA:  return geo3d_peek_data(&v->geo);
+    case V9968_PORT_GEO_INDEX: return geo3d_status(v->geo);
+    case V9968_PORT_GEO_DATA:  return geo3d_peek_data(v->geo);
     default:                   return 0xFF;
     }
 }
@@ -363,7 +366,7 @@ V9968_HOT uint8_t v9968_read_port_seen(v9968_t *v, uint8_t port, uint8_t value) 
         status_read(v, value);
         break;
     case V9968_PORT_GEO_DATA:
-        geo3d_read_data(&v->geo);
+        geo3d_read_data(v->geo);
         break;
     case V9968_PORT_GEO_INDEX:
         break;

@@ -34,7 +34,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     int mode = atoi(argv[1]);
-    v9968_init(&vdp, vram);
+    static geo3d_t geo;
+    v9968_init(&vdp, vram, &geo);
     vdp.cmd.rtl_lmcm = getenv("V9968_V9938_LMCM") == NULL;
     vdp.regs[0] = mode_r0[mode];
     vdp.regs[1] = mode_r1[mode];

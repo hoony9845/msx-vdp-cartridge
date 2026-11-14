@@ -18,7 +18,8 @@ static double now_ns(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t)
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <log> [out.ppm]\n", argv[0]); return 2; }
     FILE *f = fopen(argv[1], "r"); if (!f) { perror(argv[1]); return 1; }
-    v9968_init(&vdp, vram);
+    static geo3d_t geo;
+    v9968_init(&vdp, vram, &geo);
     static char buf[1 << 16]; int in = 0;
     while (fgets(buf, sizeof buf, f)) {
         char *p = strstr(buf, "DUMP begin"); if (p) { in = 1; continue; }
