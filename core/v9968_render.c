@@ -42,12 +42,28 @@ volatile uint32_t v9968_prof_us[6];
 static uint16_t line_c15[LINE_MAX];       /* composed line, 0RRRRRGGGGGBBBBB */
 static uint8_t  bg_idx[LINE_MAX];         /* palette modes: palette index */
 
-/* sprites, 256-dot resolution */
-static uint8_t  spr_col[256];             /* {palette set, colour} */
-static uint8_t  spr_on[256];
+/* sprites, 256-dot resolution: one word per dot, 0 where no sprite */
+#define SPR_ON 0x8000u                    /* | mode 3 transparency << 8 | {palette set, colour} */
+static uint16_t spr_px[256];
 static uint8_t  spr_fix[256];
-static uint8_t  spr_tr[256];              /* mode 3 transparency 0..3 */
-static unsigned spr_lo, spr_hi;           /* dots with spr_on set lie in [lo, hi] */
+static unsigned spr_lo, spr_hi;           /* dots with a sprite lie in [lo, hi] */
+
+#ifdef V9968_PROF
+/* sprites drawn, sprite dots, dots composed, mixes, sprites selected */
+volatile uint32_t v9968_prof_cnt[5];
+/* CPU cycles (bench): clearing + start of the draw, mode 3 dot runs, composing */
+volatile uint32_t v9968_prof_cyc[3];
+uint32_t v9968_prof_cycles(void);
+#define PROF_CNT(i, n) (v9968_prof_cnt[i] += (n))
+#define PROF_CYC_START() uint32_t cyc_t = v9968_prof_cycles()
+#define PROF_CYC(i) do { uint32_t c_ = v9968_prof_cycles(); v9968_prof_cyc[i] += c_ - cyc_t; cyc_t = c_; } while (0)
+#define PROF_CYC_SKIP() (cyc_t = v9968_prof_cycles())
+#else
+#define PROF_CNT(i, n) do { } while (0)
+#define PROF_CYC_START() do { } while (0)
+#define PROF_CYC(i) do { } while (0)
+#define PROF_CYC_SKIP() do { } while (0)
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Colours                                                             */
@@ -434,7 +450,50 @@ static void sprite_collision(v9968_t *v, unsigned x, unsigned py) {
     v->col_y = (uint16_t)((py + 8) & 0x3FF);
 }
 
-static void render_sprites(const line_t *l, bool *any) {
+/* The fast path's output for mode 3 sprites: each dot is composed into `o`
+ * (one word per dot, RGB565 twice) as soon as a sprite takes it, which is
+ * final since the first sprite to take a dot keeps it. */
+typedef struct {
+    uint32_t *o;
+    const uint16_t *pal, *tbl;      /* palette / G7 colours, RGB565 */
+    bool fixed, g7, epal, tp;
+    uint16_t bl;                    /* border, 15 bits */
+    unsigned ho_l;
+} spr_out_t;
+
+/* Mode 3 translucency over the background dot b (as the compose loop of
+ * v9968_render_line): s_part is the sprite colour in mix_c15_fast's packed
+ * form times 4 - t. */
+static inline uint16_t sp3_mix(const v9968_t *v, const spr_out_t *so, unsigned b,
+                               uint32_t s_part, unsigned t) {
+    uint16_t bgc = so->g7 ? (so->epal ? v->palette[b] : g7_c15((uint8_t)b))
+                          : ((b == 0 && !so->tp) ? so->bl : v->palette[b]);
+    uint32_t bw = (bgc & 0x7C1Fu) | ((uint32_t)(bgc & 0x03E0u) << 16);
+    uint32_t m = ((s_part + bw * t) >> 2) & 0x03E07C1Fu;
+    return c15_to_565(v->gamma, (uint16_t)((m & 0x7C1Fu) | (m >> 16)));
+}
+
+/* Translucent results by (background index, sprite colour, transparency):
+ * entry = valid | tag << 16 | RGB565, index = b | (col & 15) << 8 (the
+ * colours of one sprite never share an entry), tag = col >> 4 | t << 4.
+ * Emptied when anything sp3_mix reads changes. */
+#define MIX_VALID 0x01000000u
+static uint32_t mix_cache[4096];
+static uint32_t mix_cache_gen = ~0u, mix_cache_ctx = ~0u;
+
+static void mix_cache_check(const v9968_t *v, const spr_out_t *so) {
+    uint32_t gen = v->pal_gen;
+    uint32_t ctx = (uint32_t)v->gamma | (uint32_t)so->g7 << 1 | (uint32_t)so->epal << 2 |
+                   (uint32_t)so->tp << 3 | (uint32_t)so->bl << 4;
+    if (gen != mix_cache_gen || ctx != mix_cache_ctx) {
+        memset(mix_cache, 0, sizeof(mix_cache));
+        mix_cache_gen = gen;
+        mix_cache_ctx = ctx;
+    }
+}
+
+/* Returns true when it composed everything into so->o (mode 3 with `so`). */
+static bool render_sprites(const line_t *l, bool *any, const spr_out_t *so) {
     v9968_t *v = l->v;
 #ifdef V9968_PROF
     uint32_t sub_t = v9968_prof_now();
@@ -515,13 +574,18 @@ static void render_sprites(const line_t *l, bool *any) {
         nsel++;
     }
     PROF_SUB(4, sub_t);
-    if (nsel == 0) return;
+    PROF_CNT(4, nsel);
+    if (nsel == 0) return false;
+    if (!sp3) so = NULL;
+    if (so) mix_cache_check(v, so);
+    PROF_CYC_START();
 
-    memset(spr_on, 0, sizeof(spr_on));
+    memset(spr_px, 0, sizeof(spr_px));
     if (!sp3) memset(spr_fix, 0, sizeof(spr_fix));
     spr_lo = sp3 ? 255u : 0u;
     spr_hi = sp3 ? 0u : 255u;
     bool cc0_found = false;
+    PROF_CYC(0);
 
     for (unsigned s = 0; s < nsel; s++) {
         const sel_t *p = &sel[s];
@@ -535,50 +599,135 @@ static void render_sprites(const line_t *l, bool *any) {
             sy &= (16u << bs) - 1u;
             uint32_t pa = ((((pat >> 4) << 8) | (pat & 15)) + ((page << 12) | (sy << 4))) & 0x7FFF;
             uint32_t addr = (spg + (pa << 3)) & V9968_VRAM_MASK;
-            uint8_t pb[8];
-            for (unsigned i = 0; i < 8; i++) pb[i] = v->vram[(addr + i) & V9968_VRAM_MASK];
             if (!mgx) continue;                      /* mgx = 0 draws nothing */
-            /* the 16 dots of the row, mirrored if asked */
-            uint8_t nibs[16];
-            if (!(ctl & 0x10)) {
-                for (unsigned k = 0; k < 8; k++) { nibs[2 * k] = pb[k] >> 4; nibs[2 * k + 1] = pb[k] & 15; }
-            } else {
-                for (unsigned k = 0; k < 8; k++) { nibs[15 - 2 * k] = pb[k] >> 4; nibs[14 - 2 * k] = pb[k] & 15; }
-            }
-            divide_init();
-            const uint8_t *bound = div_start[mgx];
             /* the part on screen: X wraps at 1024, dots 256.. are hidden */
             unsigned ia, ib;
             if (x0 < 256)               { ia = 0;          ib = 256 - x0 < mgx ? 256 - x0 : mgx; }
             else if (x0 + mgx > 1024)   { ia = 1024 - x0;  ib = mgx; }
             else continue;
+            /* the row's 16 dots, dot 0 in the top nibble (mirrored if asked) */
+            uint32_t r[2] = { 0, 0 };
+            for (unsigned i = 0; i < 8; i++)
+                r[i >> 2] = r[i >> 2] << 8 | v->vram[(addr + i) & V9968_VRAM_MASK];
+            if (!(r[0] | r[1])) continue;
+            bool mirror = ctl & 0x10;
+            divide_init();
+            const uint8_t *bound = div_start[mgx];
             unsigned lo = spr_lo, hi = spr_hi;
-            uint8_t cbase = (uint8_t)((ctl & 15) << 4), tr = (uint8_t)(ctl >> 6);
-            /* one run of i per source dot (div_start), transparent ones skipped */
-            for (unsigned d = 0; d < 16; d++) {
-                uint8_t nib = nibs[d];
-                if (!nib) continue;
-                unsigned i = bound[d], e = bound[d + 1];
-                if (i < ia) i = ia;
-                if (e > ib) e = ib;
-                if (i >= e) continue;
-                uint8_t col = (uint8_t)(cbase | nib);
-                for (unsigned j = i; j < e; j++) {
-                    unsigned sx = (x0 + j) & 0x3FF;
-                    if (spr_on[sx]) {
-                        sprite_collision(v, sx, l->py);    /* spr_col & 15 != 0 in mode 3 */
-                        continue;
-                    }
-                    spr_on[sx] = 1;
-                    spr_col[sx] = col;
-                    spr_tr[sx] = tr;
+            unsigned tr = ctl >> 6;
+            uint16_t vbase = (uint16_t)(SPR_ON | tr << 8 | (ctl & 15) << 4);
+            /* collisions: only until the first one sets C */
+            bool detect = !(v->sprite_status & V9968_S0_C);
+            PROF_CNT(0, 1);
+            PROF_CYC_SKIP();
+            /* Non-transparent source dots d in increasing order (bit 28 - 4k
+             * of word k / 8 marks nibble k; mirrored, d = 15 - k), one run of
+             * i each (div_start); i runs over on-screen dots only, x0 + i
+             * does not wrap inside it. */
+            if (so) {
+                /* Compose into the output as the dots are taken: per
+                 * non-transparent source dot d (in increasing order: bit
+                 * 28 - 4k of mask word k / 8 marks nibble k; mirrored, d =
+                 * 15 - k) its run of i (div_start), on-screen part only. */
+                uint32_t z[2];
+                for (unsigned k = 0; k < 2; k++) {
+                    uint32_t w = r[k] | r[k] >> 1;
+                    z[k] = (w | w >> 2) & 0x11111111u;
                 }
-                unsigned a0 = (x0 + i) & 0x3FF, a1 = (x0 + e - 1) & 0x3FF;
-                if (a0 < lo) lo = a0;
-                if (a1 > hi) hi = a1;
+                unsigned ho_l = so->ho_l, ndots = 0;
+                bool mix = !so->fixed && tr;
+                uint32_t *out = so->o;
+                uint8_t cb = (uint8_t)((ctl & 15) << 4);
+                for (unsigned half = 0; half < 2; half++) {
+                    unsigned k = mirror ? 1 - half : half;
+                    uint32_t m = z[k];
+                    while (m) {
+                        unsigned pos = mirror ? (unsigned)__builtin_ctz(m) : 31u - (unsigned)__builtin_clz(m);
+                        m &= ~(1u << pos);
+                        unsigned e4 = k * 8 + (28 - pos) / 4;
+                        unsigned d = mirror ? 15 - e4 : e4;
+                        unsigned i = bound[d], e = bound[d + 1];
+                        if (i < ia) i = ia;
+                        if (e > ib) e = ib;
+                        if (i >= e) continue;
+                        unsigned nib = (r[k] >> pos) & 15;
+                        uint8_t col = (uint8_t)(cb | nib);
+                        uint16_t val = (uint16_t)(vbase | nib);
+                        uint32_t c32 = so->fixed ? so->tbl[g7_sprite[nib]] * 0x10001u   /* G7 colours */
+                                                 : so->pal[col] * 0x10001u;
+                        uint32_t tag = MIX_VALID | (uint32_t)((col >> 4) | tr << 4) << 16;
+                        unsigned x = (x0 + i) & 0x3FF, xe = x + (e - i);   /* no wrap inside */
+                        ndots += e - i;
+                        if (mix) PROF_CNT(2, e - i);
+                        for (; x < xe; x++) {
+                            if (spr_px[x]) {
+                                if (detect) {
+                                    sprite_collision(v, x, l->py);   /* spr_col & 15 != 0 in mode 3 */
+                                    detect = false;
+                                }
+                                continue;
+                            }
+                            spr_px[x] = val;
+                            if (x < ho_l) continue;                  /* in R#27's border */
+                            if (!mix) { out[x] = c32; continue; }
+                            unsigned b = bg_idx[x - ho_l];
+                            unsigned idx = b | (col & 15u) << 8;
+                            uint32_t en = mix_cache[idx];
+                            if ((en & 0xFFFF0000u) != tag) {
+                                uint16_t sp = v->palette[col];
+                                uint32_t s_part = ((sp & 0x7C1Fu) | ((uint32_t)(sp & 0x03E0u) << 16)) * (4u - tr);
+                                en = tag | sp3_mix(v, so, b, s_part, tr);
+                                mix_cache[idx] = en;
+                                PROF_CNT(3, 1);
+                            }
+                            out[x] = (en & 0xFFFFu) * 0x10001u;
+                        }
+                    }
+                }
+                PROF_CNT(1, ndots);
+                PROF_CYC(1);
+                continue;
+            }
+            uint32_t z[2];
+            for (unsigned k = 0; k < 2; k++) {
+                uint32_t w = r[k] | r[k] >> 1;
+                z[k] = (w | w >> 2) & 0x11111111u;
+            }
+            for (unsigned half = 0; half < 2; half++) {
+                unsigned k = mirror ? 1 - half : half;
+                uint32_t m = z[k];
+                while (m) {
+                    unsigned pos = mirror ? (unsigned)__builtin_ctz(m) : 31u - (unsigned)__builtin_clz(m);
+                    m &= ~(1u << pos);
+                    unsigned e4 = k * 8 + (28 - pos) / 4;          /* nibble */
+                    unsigned d = mirror ? 15 - e4 : e4;            /* source dot */
+                    unsigned nib = (r[k] >> pos) & 15;
+                    unsigned i = bound[d], e = bound[d + 1];
+                    if (i < ia) i = ia;
+                    if (e > ib) e = ib;
+                    if (i >= e) continue;
+                    uint16_t val = (uint16_t)(vbase | nib);
+                    unsigned a0 = (x0 + i) & 0x3FF, a1 = (x0 + e - 1) & 0x3FF;
+                    uint16_t *px = spr_px + a0;
+                    unsigned cnt = e - i;
+                    PROF_CNT(1, cnt);
+                    for (unsigned j = 0; j < cnt; j++) {
+                        if (px[j]) {
+                            if (detect) {
+                                sprite_collision(v, a0 + j, l->py);   /* spr_col & 15 != 0 in mode 3 */
+                                detect = false;
+                            }
+                            continue;
+                        }
+                        px[j] = val;
+                    }
+                    if (a0 < lo) lo = a0;
+                    if (a1 > hi) hi = a1;
+                }
             }
             spr_lo = lo;
             spr_hi = hi;
+            PROF_CYC(1);
             continue;
         }
 
@@ -612,25 +761,24 @@ static void render_sprites(const line_t *l, bool *any) {
             bool dot = off >= 0 && (unsigned)off < w &&
                        (bits & (0x8000 >> (mag ? off >> 1 : off)));
             bool opaque = dot && (c != 0 || tp);
-            if (dot && !first && spr_on[px] && !ic && !cc &&
-                ((spr_col[px] & 15) != 0 || tp))
+            if (dot && !first && spr_px[px] && !ic && !cc &&
+                ((spr_px[px] & 15) != 0 || tp))
                 sprite_collision(v, px, l->py);
             if (first) {
-                if (!cc && opaque) { spr_on[px] = 1; spr_col[px] = (uint8_t)(set << 4 | c); }
+                if (!cc && opaque) spr_px[px] = (uint16_t)(SPR_ON | set << 4 | c);
                 continue;
             }
             if (spr_fix[px]) continue;
             if (!cc0_before) {
-                if (!cc && opaque) { spr_on[px] = 1; spr_col[px] = (uint8_t)(set << 4 | c); }
+                if (!cc && opaque) spr_px[px] = (uint16_t)(SPR_ON | set << 4 | c);
             } else if (opaque) {
-                if (spr_on[px]) {
-                    if (cc) spr_col[px] |= c;
+                if (spr_px[px]) {
+                    if (cc) spr_px[px] |= c;
                     else    spr_fix[px] = 1;
                 } else {
-                    spr_on[px] = 1;
-                    spr_col[px] = (uint8_t)(set << 4 | c);
+                    spr_px[px] = (uint16_t)(SPR_ON | set << 4 | c);
                 }
-            } else if (spr_on[px] && !cc) {
+            } else if (spr_px[px] && !cc) {
                 spr_fix[px] = 1;
             }
         }
@@ -638,6 +786,7 @@ static void render_sprites(const line_t *l, bool *any) {
     }
     PROF_SUB(5, sub_t);
     *any = true;
+    return so != NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -830,29 +979,38 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
         }
         PROF_MARK(1);
 
-        bool any = false;
-        if (!(v->regs[8] & 0x02)) render_sprites(&l, &any);
-        if (any) {
+        bool any = false, composed = false;
+        if (!(v->regs[8] & 0x02)) {
+            spr_out_t so = { o, pal, tbl, fixed, g7, epal, tp, bl, l.ho_l };
+            composed = render_sprites(&l, &any, &so);
+        }
+        if (any && !composed) {
             bool sp3 = v9968_sp3(v);
             unsigned x1 = spr_hi + 1u;
             unsigned mix_key = ~0u;
             uint16_t mix_565 = 0;
+            unsigned ncomp = 0, nmix = 0;
+            PROF_CYC_START();
             for (unsigned x = spr_lo > l.ho_l ? spr_lo : l.ho_l; x < x1; x++) {
-                if (!spr_on[x]) continue;
-                uint8_t col = spr_col[x];
+                unsigned sv = spr_px[x];
+                if (!sv) continue;
+                ncomp++;
+                uint8_t col = (uint8_t)sv;
+                unsigned tr = (sv >> 8) & 3;
                 uint16_t c565;
                 if (fixed) {
                     c565 = tbl[g7_sprite[col & 15]];          /* fixed => G7 colours */
-                } else if (sp3 && spr_tr[x]) {
+                } else if (sp3 && tr) {
                     /* translucent: mix in 15 bits over this dot's background
                      * (the last result is reused for a run of equal dots) */
                     unsigned b = bg_idx[x - l.ho_l];
-                    unsigned key = b | (unsigned)col << 8 | (unsigned)spr_tr[x] << 16;
+                    unsigned key = b | (sv & 0x3FF) << 8;
                     if (key != mix_key) {
                         uint16_t bgc = g7 ? (epal ? v->palette[b] : g7_c15((uint8_t)b))
                                           : ((b == 0 && !tp) ? bl : v->palette[b]);
-                        mix_565 = c15_to_565(v->gamma, mix_c15_fast(bgc, v->palette[col], spr_tr[x]));
+                        mix_565 = c15_to_565(v->gamma, mix_c15_fast(bgc, v->palette[col], tr));
                         mix_key = key;
+                        nmix++;
                     }
                     c565 = mix_565;
                 } else {
@@ -860,6 +1018,9 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
                 }
                 o[x] = c565 * 0x10001u;
             }
+            PROF_CYC(2);
+            PROF_CNT(2, ncomp);
+            PROF_CNT(3, nmix);
         }
         PROF_MARK(2);
 
@@ -897,7 +1058,7 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
     PROF_MARK(1);
     /* sprites */
     bool any = false;
-    if (!(v->regs[8] & 0x02)) render_sprites(&l, &any);
+    if (!(v->regs[8] & 0x02)) render_sprites(&l, &any, NULL);
     if (any) {
         bool sp3 = v9968_sp3(v);
         /* sprites ignore R#27 (vdp_sprite_makeup_pixel gets the unscrolled
@@ -906,22 +1067,24 @@ V9968_HOT void v9968_render_line(v9968_t *v, unsigned line, uint16_t *out, unsig
         unsigned delay = (l.mode == V9968_MODE_G7 && (v->regs[25] & 0x08)) ? 4 : 0;
         for (unsigned x = l.ho_l + delay; x < 256; x++) {
             unsigned sx = x - delay;
-            if (!spr_on[sx]) continue;
-            uint8_t col = spr_col[sx];
+            unsigned sv = spr_px[sx];
+            if (!sv) continue;
+            uint8_t col = (uint8_t)sv;
+            unsigned tr = (sv >> 8) & 3;
             if (fixed) {
                 c[x] = g7_c15(g7_sprite[col & 15]);
             } else if (l.mode == V9968_MODE_G5) {
                 uint16_t c0 = v->palette[(col & 0xF0) | ((col >> 2) & 3)];
                 uint16_t c1 = v->palette[(col & 0xF0) | (col & 3)];
-                c[2 * x]     = sp3 ? mix_c15(c[2 * x], c0, spr_tr[sx]) : c0;
-                c[2 * x + 1] = sp3 ? mix_c15(c[2 * x + 1], c1, spr_tr[sx]) : c1;
+                c[2 * x]     = sp3 ? mix_c15(c[2 * x], c0, tr) : c0;
+                c[2 * x + 1] = sp3 ? mix_c15(c[2 * x + 1], c1, tr) : c1;
             } else if (hires) {
                 uint16_t sc = v->palette[col];
-                c[2 * x]     = sp3 ? mix_c15(c[2 * x], sc, spr_tr[sx]) : sc;
-                c[2 * x + 1] = sp3 ? mix_c15(c[2 * x + 1], sc, spr_tr[sx]) : sc;
+                c[2 * x]     = sp3 ? mix_c15(c[2 * x], sc, tr) : sc;
+                c[2 * x + 1] = sp3 ? mix_c15(c[2 * x + 1], sc, tr) : sc;
             } else {
                 uint16_t sc = v->palette[col];
-                c[x] = sp3 ? mix_c15(c[x], sc, spr_tr[sx]) : sc;
+                c[x] = sp3 ? mix_c15(c[x], sc, tr) : sc;
             }
         }
     }

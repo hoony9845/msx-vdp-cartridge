@@ -98,6 +98,12 @@ static void __not_in_flash_func(v9990_fetch)(const v9990_t *v, uint32_t phys,
 }
 
 uint32_t __not_in_flash_func(v9968_prof_now)(void) { return timer_hw->timerawl; }
+/* DWT cycle counter of this core (enabled by "bench" on core0) */
+uint32_t __not_in_flash_func(v9968_prof_cycles)(void) { return *(volatile uint32_t *)0xE0001004u; }
+static void enable_cycle_counter(void) {
+    *(volatile uint32_t *)0xE000EDFCu |= 1u << 24;          /* DEMCR.TRCENA */
+    *(volatile uint32_t *)0xE0001000u |= 1u;                /* DWT_CTRL.CYCCNTENA */
+}
 
 /* USB serial "bench": time the parts of rendering one line of the current
  * V9990 picture (on a copy of the VDP state), to find where time goes. */
@@ -119,7 +125,10 @@ static uint32_t __not_in_flash_func(bench_fetch)(uint32_t phys, uint32_t len) {
 
 #ifdef V9968_PROF
 extern volatile uint32_t v9968_prof_us[6];
+extern volatile uint32_t v9968_prof_cnt[5];
+extern volatile uint32_t v9968_prof_cyc[3];
 #endif
+static uint32_t bench_cnt[8];             /* per frame: v9968_prof_cnt, v9968_prof_cyc */
 static v9968_t bench_v9968;
 
 /* V9968: every line of the current picture once, on a copy of the VDP
@@ -127,8 +136,10 @@ static v9968_t bench_v9968;
 static void __not_in_flash_func(bench_v9968_frame)(uint32_t res[8]) {
     unsigned h = v9968_display_height(&bench_v9968);
 #ifdef V9968_PROF
-    uint32_t p0[6];
+    uint32_t p0[6], c0[8];
     for (int i = 0; i < 6; i++) p0[i] = v9968_prof_us[i];
+    for (int i = 0; i < 5; i++) c0[i] = v9968_prof_cnt[i];
+    for (int i = 0; i < 3; i++) c0[5 + i] = v9968_prof_cyc[i];
 #endif
     uint32_t t0 = timer_hw->timerawl, mx = 0;
     for (unsigned y = 0; y < h; y++) {
@@ -141,6 +152,8 @@ static void __not_in_flash_func(bench_v9968_frame)(uint32_t res[8]) {
     res[1] = mx;
 #ifdef V9968_PROF
     for (int i = 0; i < 6; i++) res[2 + i] = (v9968_prof_us[i] - p0[i]) * 10u / h;
+    for (int i = 0; i < 5; i++) bench_cnt[i] = v9968_prof_cnt[i] - c0[i];
+    for (int i = 0; i < 3; i++) bench_cnt[5 + i] = v9968_prof_cyc[i] - c0[5 + i];
 #else
     for (int i = 0; i < 6; i++) res[2 + i] = 0;
 #endif
@@ -216,9 +229,12 @@ static uint32_t __not_in_flash_func(bench_lrmm)(uint8_t r0, uint8_t arg, unsigne
 
 static void main_bench_v9968(void) {
     uint32_t full[8], nospr[8];
+    enable_cycle_counter();
     uint32_t irq = save_and_disable_interrupts();
     bench_v9968 = v9968;
     bench_v9968_frame(full);
+    uint32_t cnt[8];
+    for (int i = 0; i < 8; i++) cnt[i] = bench_cnt[i];
     bench_v9968.regs[8] |= 0x02;                          /* SPD */
     bench_v9968_frame(nospr);
     restore_interrupts(irq);
@@ -249,6 +265,10 @@ static void main_bench_v9968(void) {
            (unsigned long)full[7], (unsigned long)full[5],
            (unsigned long)nospr[0], (unsigned long)nospr[1], (unsigned long)nospr[2],
            (unsigned long)nospr[3], (unsigned long)nospr[4], (unsigned long)nospr[5]);
+    printf("bench v9968 frame: %lu sprites selected, %lu mode 3 drawn, %lu sprite dots, %lu translucent, "
+           "%lu mix cache misses; cycles: draw start %lu, mode 3 runs %lu, composing %lu\n",
+           (unsigned long)cnt[4], (unsigned long)cnt[0], (unsigned long)cnt[1], (unsigned long)cnt[2],
+           (unsigned long)cnt[3], (unsigned long)cnt[5], (unsigned long)cnt[6], (unsigned long)cnt[7]);
 }
 
 void main_bench(void) {
