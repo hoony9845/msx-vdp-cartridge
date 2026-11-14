@@ -1,12 +1,13 @@
 /*
- * LRMM fast path against the general per-pixel code: random LRMM commands
- * in every bitmap mode, run in lockstep in random budgets; the command
+ * The command engine's fast paths (LRMM, HMMM, LMMM) against the general
+ * per-pixel code: random commands in every bitmap mode, run in lockstep in
+ * random budgets; the command
  * state and the clocks used must match after every call, and VRAM at the
  * end. Half the commands also stop early through v9968_cmd_watch (watching
  * a VRAM word the command writes); the general code then runs the same
  * number of clocks.
  *
- *   usage: test_v9968_lrmm [commands] [seed]
+ *   usage: test_v9968_cmdfast [commands] [seed]
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +62,9 @@ int main(int argc, char **argv) {
             wr(49, (uint8_t)vy); wr(50, (uint8_t)(vy >> 8));
         }
         wr(45, (uint8_t)rnd());                          /* DIX/DIY/XHR/FG4 ... */
-        wr(46, (uint8_t)(0x30 | ((rnd() & 1) ? 0 : (rnd() & 0x0F))));   /* IMP half the time */
+        static const uint8_t ops[3] = { 0x30, 0x90, 0xD0 };          /* LRMM, LMMM, HMMM */
+        uint8_t op = ops[rnd() % 3];
+        wr(46, (uint8_t)(op | ((rnd() & 1) ? 0 : (rnd() & 0x0F))));     /* IMP half the time */
 
         /* the first destination bytes (layout as G4/G7 without interleave) */
         unsigned dxw = vb.cmd.reg_dx, dyw = vb.cmd.dy;
@@ -85,8 +88,8 @@ int main(int argc, char **argv) {
             v9968_cmd_watch = w;
             if (ua != ub || memcmp(&va.cmd, &vb.cmd, sizeof(va.cmd)) != 0 ||
                 va.int_flags != vb.int_flags) {
-                printf("FAIL command %u (mode G%u r20 %02x arg %02x) call %u budget %u: "
-                       "clocks %u / %u\n", n, m + 4, r20, va.cmd.arg, call, budget, ua, ub);
+                printf("FAIL command %u (op %x mode G%u r20 %02x arg %02x) call %u budget %u: "
+                       "clocks %u / %u\n", n, va.cmd.op, m + 4, r20, va.cmd.arg, call, budget, ua, ub);
                 return 1;
             }
             pixels += ua;
@@ -97,7 +100,7 @@ int main(int argc, char **argv) {
         }
     }
     v9968_cmd_watch = NULL;
-    printf("test_v9968_lrmm: %u commands identical (%lu clocks, %lu early stops)\n",
+    printf("test_v9968_cmdfast: %u commands identical (%lu clocks, %lu early stops)\n",
            count, pixels, yields);
     if (yields == 0) { printf("FAIL: v9968_cmd_watch never stopped a command\n"); return 1; }
     return 0;
