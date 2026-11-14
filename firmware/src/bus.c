@@ -37,7 +37,6 @@ static_assert(PIN_D0 == PIN_A0 + 4, "data bus must follow A0-A3");
 #define V9968_BLOCK 8u                          /* V9968 ports at nibble 8-F */
 #define V9968_CLK_PER_US 86u                    /* command engine: 85.9MHz */
 #define V9968_SLICE 512u                        /* max clocks per loop pass */
-#define V9968_CHUNK 32u                         /* clocks between bus event checks */
 #define V9990_CMD_SLICE 4u                      /* command engine units per loop pass */
 
 static uint32_t ring[RING_WORDS] __attribute__((aligned(1u << RING_BITS)));
@@ -173,6 +172,7 @@ void bus_init(vdp_chip_t c, void *vdp) {
     for (uint port = 0; port < 16; port++) read_table[port] = 0xFF;
     if (chip == VDP_CHIP_V9968) refresh_v9968();
     else                        refresh_v9990();
+    v9968_cmd_watch = &dma_hw->ch[dma_ring].write_addr;
 
     init_gpio();
     init_monitor_sm();
@@ -320,17 +320,19 @@ static void __not_in_flash_func(loop_v9968)(void) {
         last_us = now;
         if (credit > (int32_t)V9968_SLICE) credit = V9968_SLICE;
         if (credit > 0 && !bus_cmd_hold && (v9968_cmd_busy(v9968) || v9968->geo.running)) {
-            /* In small pieces, back to the bus as soon as an event waits: a
-             * slice of 512 clocks is 20-30 us of CPU, and a status read ~6 us
-             * after "R#15 = 2" could get the old status register (SUPER CAT
-             * went on while its LRMM was still running). */
+            /* Back to the bus as soon as an event waits: the engine watches
+             * the ring (v9968_cmd_watch) and stops within ~32 clocks
+             * once one came in, so a read held on /WAIT is not kept
+             * for a whole slice (SUPER CAT reads the status ~6 us after
+             * "R#15 = 2"). The read table is refreshed once at the end: a
+             * read waits on /WAIT until the ring is served, after this. */
             do {
-                unsigned b = credit > (int32_t)V9968_CHUNK ? V9968_CHUNK : (unsigned)credit;
+                unsigned b = (unsigned)credit;
                 unsigned used = v9968_service(v9968, b);
                 credit -= (int32_t)used;
-                refresh_v9968();
                 if (used < b) break;              /* done, or waiting for the CPU */
             } while (credit > 0 && ring_head() == tail);
+            refresh_v9968();
         } else {
             read_table[V9968_BLOCK + V9968_PORT_CTRL] = v9968_peek_port(v9968, V9968_PORT_CTRL);
             read_table[V9968_BLOCK + V9968_PORT_INT] = v9968_peek_port(v9968, V9968_PORT_INT);

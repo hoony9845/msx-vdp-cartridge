@@ -196,6 +196,13 @@ void v9968_cmd_write_reg(v9968_t *v, unsigned reg, uint8_t data);
 /* Runs the command engine for up to `budget` clocks of the 85.9MHz engine
  * clock; returns the clocks used (0 when idle or waiting for the CPU). */
 V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget);
+/* Tests: run LRMM through the general per-pixel code only (no fast path). */
+extern bool v9968_cmd_reference;
+/* Optional: v9968_cmd_step returns early (between pixels, after at least 32
+ * clocks) once this word differs from its value at the call, so a long
+ * budget does not keep the caller from other work (the firmware watches the
+ * bus event ring's DMA write address). */
+extern const volatile uint32_t *v9968_cmd_watch;
 /* Feeds pending geo3d commands to the idle command engine, then runs it. */
 V9968_HOT unsigned v9968_service(v9968_t *v, unsigned budget);
 static inline bool v9968_cmd_busy(const v9968_t *v) { return v->cmd.state != 0; }

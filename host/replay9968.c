@@ -12,6 +12,7 @@
  *   shot <name>        render the current frame to <out_dir>/<name>.ppm
  *
  * Pictures are rendered without the cartridge's output gamma, like openMSX.
+ * V9968_CMD_REFERENCE=1 runs LRMM without its fast path.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,6 +111,7 @@ int main(int argc, char **argv) {
     if (!in) { perror(argv[1]); return 1; }
     v9968_init(&vdp, vram);
     vdp.gamma = false;
+    v9968_cmd_reference = getenv("V9968_CMD_REFERENCE") != NULL;
     v9968_video_vblank_end(&vdp);
     if (getenv("REPLAY_GEO3D_CMDS")) geo_log = fopen(getenv("REPLAY_GEO3D_CMDS"), "w");
 

@@ -173,6 +173,45 @@ void main_dump(void) {
     bus_cmd_hold = false;
 }
 
+/* LRMM speed: a 128x128 copy of the top-left corner onto itself (VX = 1,
+ * VY = 0, so VRAM keeps its contents) on a copy of the VDP state, in G4
+ * (r0 = 06h) or FG4 in G7 (r0 = 0Eh, ARG bit 7), with the command engine
+ * held. Results in ns per pixel; the cartridge takes ~140 (12 clocks). */
+#define BENCH_LRMM_PX (128u * 128u)
+
+static void bench_lrmm_start(uint8_t r0, uint8_t arg) {
+    v9968_t *b = &bench_v9968;
+    b->regs[0] = r0;
+    b->regs[20] = (uint8_t)((b->regs[20] & ~0x08) | 0x01);   /* HS, no SP3 */
+    b->regs[21] = 0;                                           /* V9968 mode */
+    b->geo.running = false;
+    static const uint8_t r[][2] = {
+        {32, 0}, {33, 0}, {34, 0}, {35, 0}, {36, 0}, {37, 0}, {38, 0}, {39, 0},
+        {40, 128}, {41, 0}, {42, 128}, {43, 0}, {47, 0}, {48, 1}, {49, 0}, {50, 0},
+        {51, 0}, {52, 0}, {53, 0}, {54, 0}, {55, 0xFF}, {56, 1}, {57, 0xFF}, {58, 7},
+    };
+    for (unsigned i = 0; i < sizeof(r) / sizeof(r[0]); i++) v9968_cmd_write_reg(b, r[i][0], r[i][1]);
+    v9968_cmd_write_reg(b, 45, arg);
+    v9968_cmd_write_reg(b, 46, 0x30);
+}
+
+/* chunk 0: one call; otherwise calls of `chunk` clocks until done, with the
+ * bus event watch (as core1 runs it) or without. ns per pixel. */
+static uint32_t __not_in_flash_func(bench_lrmm)(uint8_t r0, uint8_t arg, unsigned chunk, bool ref,
+                                                bool watch) {
+    const volatile uint32_t *w = v9968_cmd_watch;
+    v9968_cmd_watch = watch ? w : NULL;
+    bench_lrmm_start(r0, arg);
+    v9968_cmd_reference = ref;
+    uint32_t t0 = timer_hw->timerawl;
+    if (chunk == 0) v9968_cmd_step(&bench_v9968, 1u << 30);
+    else while (v9968_cmd_busy(&bench_v9968)) v9968_service(&bench_v9968, chunk);
+    uint32_t t = timer_hw->timerawl - t0;
+    v9968_cmd_reference = false;
+    v9968_cmd_watch = w;
+    return t * 1000u / BENCH_LRMM_PX;
+}
+
 static void main_bench_v9968(void) {
     uint32_t full[8], nospr[8];
     uint32_t irq = save_and_disable_interrupts();
@@ -181,6 +220,25 @@ static void main_bench_v9968(void) {
     bench_v9968.regs[8] |= 0x02;                          /* SPD */
     bench_v9968_frame(nospr);
     restore_interrupts(irq);
+
+    extern volatile bool bus_cmd_hold;
+    bus_cmd_hold = true;
+    busy_wait_us(500);
+    irq = save_and_disable_interrupts();
+    bench_v9968 = v9968;
+    uint32_t g4 = bench_lrmm(0x06, 0x00, 0, false, false);
+    uint32_t g4c = bench_lrmm(0x06, 0x00, 32, false, false);
+    uint32_t g4w = bench_lrmm(0x06, 0x00, 512, false, true);
+    uint32_t g4r = bench_lrmm(0x06, 0x00, 0, true, false);
+    uint32_t g4rc = bench_lrmm(0x06, 0x00, 32, true, false);
+    uint32_t f4 = bench_lrmm(0x0E, 0x80, 0, false, false);
+    uint32_t f4w = bench_lrmm(0x0E, 0x80, 512, false, true);
+    restore_interrupts(irq);
+    bus_cmd_hold = false;
+    printf("bench lrmm (ns/pixel; one call / 32-clock calls / 512-clock calls watching the bus): "
+           "G4 %lu / %lu / %lu (general code %lu / %lu), FG4 %lu / - / %lu\n",
+           (unsigned long)g4, (unsigned long)g4c, (unsigned long)g4w, (unsigned long)g4r,
+           (unsigned long)g4rc, (unsigned long)f4, (unsigned long)f4w);
     printf("bench v9968 (IRQs off, per line x0.1us): full avg %lu max %lu us "
            "[bg %lu col %lu spr %lu (select %lu draw %lu) out %lu]; no sprites avg %lu max %lu us "
            "[bg %lu col %lu spr %lu out %lu]\n",

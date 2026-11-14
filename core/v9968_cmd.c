@@ -19,6 +19,7 @@
  * distributed under its conditions, including the non-commercial clause;
  * see THIRD_PARTY_NOTICES.md.
  */
+#include <stddef.h>
 #include "v9968.h"
 
 enum {
@@ -53,7 +54,18 @@ typedef struct {
     bool v256;                  /* V9968 mode: 256KB, 11-bit Y */
     bool hs;
     unsigned cost;
+    const volatile uint32_t *watch;     /* v9968_cmd_watch and its value at the start */
+    uint32_t watch_val;
 } ctx_t;
+
+const volatile uint32_t *v9968_cmd_watch;
+bool v9968_cmd_reference;
+
+/* Something else needs core1 (see v9968_cmd_watch), after a minimum run. */
+#define YIELD_MIN 32u
+static inline bool yield_now(const ctx_t *x, unsigned cost) {
+    return x->watch && cost >= YIELD_MIN && *x->watch != x->watch_val;
+}
 
 static inline bool arg_maj(const v9968_cmd_state_t *c) { return c->arg & 0x01; }
 static inline bool arg_eq(const v9968_cmd_state_t *c)  { return c->arg & 0x02; }
@@ -79,6 +91,8 @@ static void make_ctx(ctx_t *x, v9968_t *v) {
     x->v256 = !v9968_v58(v);
     x->hs = (v->regs[20] & 0x01) != 0;
     x->cost = 0;
+    x->watch = v9968_cmd_watch;
+    x->watch_val = x->watch ? *x->watch : 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -140,7 +154,7 @@ static uint8_t merge(const ctx_t *x, unsigned dx, uint8_t pix, uint8_t base) {
 }
 
 /* func_lop: on full bytes; TIMP and friends test all 8 source bits */
-static uint8_t lop(unsigned op, uint8_t src, uint8_t dst) {
+static inline __attribute__((always_inline)) uint8_t lop(unsigned op, uint8_t src, uint8_t dst) {
     if ((op & 8) && src == 0) return dst;
     switch (op & 7) {
     case 1:  return src & dst;
@@ -317,7 +331,10 @@ static void advance(ctx_t *x, const cond_t *k) {
     /* LFMM source (any command steps it, like the RTL) */
     if (bit0) c->font_addr = (c->font_addr + 1) & 0x3FFFFu;
 
-    c->nyb = (uint16_t)(shift ? ((next_nyb + c->reg_nx) & 0xFFF) : (next_nyb & 0xFFF));
+    /* (the RTL steps it in every command; only LINE reads it and every
+     * command start sets it, so the others leave it alone) */
+    if (op == OP_LINE)
+        c->nyb = (uint16_t)(shift ? ((next_nyb + c->reg_nx) & 0xFFF) : (next_nyb & 0xFFF));
     c->sx = sx; c->sy = sy; c->sx2 = sx2; c->sy2 = sy2;
     c->dx = dx; c->dy = dy; c->nx = nx; c->ny = ny;
     c->reg_dx = reg_dx; c->reg_nx = reg_nx;
@@ -645,11 +662,146 @@ static bool step_one(ctx_t *x) {
     return true;
 }
 
+/* ------------------------------------------------------------------ */
+/* LRMM fast path                                                      */
+/* ------------------------------------------------------------------ */
+
+/* The LRMM pixels inside a row (not its last pixel, not at the edge of the
+ * screen): only SX/SY/DX/NX and the bit counter move, so this does what
+ * step_one would, without the general conditions()/advance(). It stops
+ * before the row's last pixel, which step_one does (it starts the next row
+ * or ends the command), or where the budget runs out. The template
+ * parameters are constants in each copy below. */
+static inline __attribute__((always_inline))
+void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, bool xhr) {
+    v9968_cmd_state_t *c = x->c;
+    const unsigned px_cost = x->hs ? COST_READ_HS * 2 + COST_WRITE_HS : COST_ACCESS_SLOW * 3;
+    if (x->cost >= budget) return;
+
+    /* pixels before the row's last one, or before DX leaves the screen */
+    uint32_t dx = c->dx, nx = c->nx;
+    bool dix = arg_dix(c);
+    uint32_t n = (c->reg_nx - nx) & 0x7FFu, room;
+    if (dix) room = (!c->wide && dx > 256) ? 0 : dx;
+    else {
+        uint32_t last = c->wide ? 511 : 255;
+        room = dx < last ? last - dx : 0;
+    }
+    if (room < n) n = room;
+    uint32_t nb = (budget - x->cost + px_cost - 1) / px_cost;      /* as many as step_one runs */
+    if (nb < n) n = nb;
+    if (n == 0) return;
+
+    uint8_t *vram = x->v->vram;
+    uint32_t sx = c->sx, sy = c->sy;
+    const uint32_t vx = (uint32_t)(int32_t)(int16_t)c->vx;
+    const uint32_t vy = (uint32_t)(int32_t)(int16_t)c->vy;
+    const int32_t wsx = c->wsx, wsy = c->wsy, wex = c->wex, wey = c->wey;
+    const unsigned lopc = c->lop;
+    const uint8_t color = c->color;
+    const int32_t dstep = dix ? -1 : 1;
+
+    /* destination row (DY does not change inside a row) */
+    uint32_t dy = c->dy, drow;
+    if (layout <= 1) drow = (dy & 0x7FFu) << 7;
+    else             drow = (dy & 0x3FFu) << 8;
+
+    uint32_t d = dx, i = 0;
+    while (i < n) {
+        /* source pixel, or the colour outside the window */
+        uint32_t syw = xhr ? ((uint32_t)(sext(sy, 21) >> 1) & 0x1FFFFFu) : sy;
+        int32_t ix = sext((sx >> 8) & 0xFFFu, 12);
+        int32_t iy = sext((syw >> 8) & 0x1FFFu, 13);
+        uint8_t src;
+        if (ix < wsx || iy < wsy || ix > wex || iy > wey) {
+            src = color;
+        } else {
+            uint32_t a;
+            if (layout == 0)      a = ((syw >> 8) & 0x7FFu) << 7 | ((sx >> 9) & 0x7Fu);
+            else if (layout == 1) a = ((syw >> 8) & 0x7FFu) << 7 | ((sx >> 10) & 0x7Fu);
+            else if (layout == 2) a = ((syw >> 8) & 0x3FFu) << 8 | ((sx >> 9) & 0xFFu);
+            else                  a = ((syw >> 8) & 0x3FFu) << 8 | ((sx >> 8) & 0xFFu);
+            uint8_t b = vram[v9968_phys(il, a)];
+            unsigned xs = (sx >> 8) & 3u;
+            if (bpp == 4)      src = (xs & 1) ? (b & 0x0F) : (b >> 4);
+            else if (bpp == 2) src = (b >> (6 - 2 * xs)) & 3;
+            else               src = b;
+        }
+
+        /* read-modify-write of the destination */
+        uint32_t da;
+        if (layout == 0)      da = drow | ((d >> 1) & 0x7Fu);
+        else if (layout == 1) da = drow | ((d >> 2) & 0x7Fu);
+        else if (layout == 2) da = drow | ((d >> 1) & 0xFFu);
+        else                  da = drow | (d & 0xFFu);
+        da = v9968_phys(il, da);
+        uint8_t base = vram[da];
+        uint8_t out;
+        if (bpp == 4) {
+            uint8_t dp = (d & 1) ? (base & 0x0F) : (base >> 4);
+            uint8_t p = lop(lopc, src, dp);
+            out = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F))
+                          : (uint8_t)((base & 0x0F) | (p << 4));
+        } else if (bpp == 2) {
+            unsigned sh = 6 - 2 * (d & 3);
+            uint8_t p = lop(lopc, src, (base >> sh) & 3);
+            out = (uint8_t)((base & ~(3u << sh)) | ((p & 3u) << sh));
+        } else {
+            out = lop(lopc, src, base);
+        }
+        vram[da] = out;
+
+        sx = (sx + vx) & 0xFFFFFu;
+        sy = (sy + vy) & 0x1FFFFFu;
+        d = (uint32_t)((int32_t)d + dstep);
+        i++;
+        if ((i & 3) == 0 && yield_now(x, x->cost + i * px_cost)) break;
+    }
+    n = i;
+
+    /* the rest of advance() for n pixels: the bit counter steps the LFMM
+     * source address each time it passes 0 */
+    uint32_t bit = c->bit_count;
+    c->font_addr = (c->font_addr + (n + 7u - bit) / 8u) & 0x3FFFFu;
+    c->bit_count = (uint8_t)((bit - n) & 7u);
+    c->sx = sx; c->sy = sy;
+    c->dx = (uint16_t)(d & 0x1FFu);
+    c->nx = (uint16_t)((nx + n) & 0x7FFu);
+    x->cost += n * px_cost;
+}
+
+/* The copies for the screen modes LRMM is used in; the rest run the
+ * general one. */
+V9968_HOT static void lrmm_g4(ctx_t *x, unsigned b)     { lrmm_row(x, b, 0, 4, false, false); }
+V9968_HOT static void lrmm_fg4(ctx_t *x, unsigned b)    { lrmm_row(x, b, 0, 8, false, false); }
+V9968_HOT static void lrmm_g7(ctx_t *x, unsigned b)     { lrmm_row(x, b, 3, 8, false, false); }
+V9968_HOT static void lrmm_g7_il(ctx_t *x, unsigned b)  { lrmm_row(x, b, 3, 8, true, false); }
+V9968_HOT static void __attribute__((noinline))
+lrmm_any(ctx_t *x, unsigned b, unsigned layout, bool il, bool xhr) {
+    lrmm_row(x, b, layout, x->bpp, il, xhr);
+}
+
+V9968_HOT static void lrmm_run(ctx_t *x, unsigned budget) {
+    unsigned layout = x->g4 ? 0 : x->g5 ? 1 : x->g6 ? 2 : 3;
+    bool il = x->interleave, xhr = arg_xhr(x);
+    void (*fast)(ctx_t *, unsigned) = NULL;
+    if (!xhr && !il && layout == 0) fast = x->bpp == 4 ? lrmm_g4 : x->bpp == 8 ? lrmm_fg4 : NULL;
+    else if (!xhr && layout == 3 && x->bpp == 8) fast = il ? lrmm_g7_il : lrmm_g7;
+
+    while (x->c->state == ST_LRMM && x->cost < budget) {
+        if (fast) fast(x, budget);
+        else      lrmm_any(x, budget, layout, il, xhr);
+        if (x->cost >= budget || yield_now(x, x->cost)) break;
+        step_one(x);                    /* the row's last pixel, or at the edge */
+    }
+}
+
 V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget) {
     if (v->cmd.state == ST_IDLE) return 0;
     ctx_t x;
     make_ctx(&x, v);
-    while (v->cmd.state != ST_IDLE && x.cost < budget) {
+    if (v->cmd.state == ST_LRMM && !v9968_cmd_reference) lrmm_run(&x, budget);
+    while (v->cmd.state != ST_IDLE && x.cost < budget && !yield_now(&x, x.cost)) {
         if (!step_one(&x)) break;
     }
     return x.cost;
