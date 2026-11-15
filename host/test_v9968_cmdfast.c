@@ -1,5 +1,6 @@
 /*
- * The command engine's fast paths (LRMM, HMMM, LMMM, LINE) against the general
+ * The command engine's fast paths (LRMM, HMMM, LMMM, LINE, HMMV, LMMV, YMMM)
+ * against the general
  * per-pixel code: random commands in every bitmap mode, run in lockstep in
  * random budgets; the command
  * state and the clocks used must match after every call, and VRAM at the
@@ -121,8 +122,8 @@ int main(int argc, char **argv) {
             wr(49, (uint8_t)vy); wr(50, (uint8_t)(vy >> 8));
         }
         wr(45, (uint8_t)rnd());                          /* DIX/DIY/XHR/FG4 ... */
-        static const uint8_t ops[4] = { 0x30, 0x90, 0xD0, 0x70 };    /* LRMM, LMMM, HMMM, LINE */
-        uint8_t op = ops[rnd() % 4];
+        static const uint8_t ops[7] = { 0x30, 0x90, 0xD0, 0x70, 0xC0, 0x80, 0xE0 };
+        uint8_t op = ops[rnd() % 7];             /* LRMM LMMM HMMM LINE HMMV LMMV YMMM */
         wr(46, (uint8_t)(op | ((rnd() & 1) ? 0 : (rnd() & 0x0F))));     /* IMP half the time */
 
         /* the first destination bytes (layout as G4/G7 without interleave) */

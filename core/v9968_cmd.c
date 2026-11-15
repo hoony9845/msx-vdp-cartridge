@@ -945,23 +945,32 @@ static inline uint32_t room_on_screen(uint32_t v, unsigned step, bool down, bool
     return v + step < lim ? (lim - 1u - v) / step : 0;
 }
 
-/* The HMMM / LMMM pixels inside a row, as lrmm_row: only SX/DX/NX and the
- * bit counter move (SX and DX by the pixel step), and the row's last pixel
- * or the edge of the screen is left to step_one. */
+enum { MM_HMMM, MM_LMMM, MM_HMMV, MM_LMMV, MM_YMMM };
+
+/* The pixels inside a row of HMMM / LMMM / HMMV / LMMV / YMMM, as lrmm_row:
+ * only SX/DX/NX and the bit counter move (SX and DX by the pixel step), and
+ * the row's last pixel or the edge of the screen is left to step_one. The
+ * fills read no source and SX does not end their rows (not sx_active); a
+ * YMMM row ends only at the edge (no nx_end), its source X being DX. */
 static inline __attribute__((always_inline))
-void mm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, bool lmmm, bool imp) {
+void mm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, unsigned kind, bool imp) {
     v9968_cmd_state_t *c = x->c;
+    const bool lmmm = kind == MM_LMMM, fill = kind == MM_HMMV || kind == MM_LMMV;
     unsigned px_cost = lmmm ? (x->hs ? COST_READ_HS * 2 + COST_WRITE_HS : COST_ACCESS_SLOW * 3)
-                            : (x->hs ? COST_READ_HS + COST_WRITE_HS : COST_ACCESS_SLOW * 2);
+                     : kind == MM_HMMV ? (x->hs ? COST_WRITE_HS : COST_ACCESS_SLOW)
+                     : (x->hs ? COST_READ_HS + COST_WRITE_HS : COST_ACCESS_SLOW * 2);
     if (x->cost >= budget) return;
 
     unsigned step = c->pixel_step;
     bool dix = arg_dix(c);
     uint32_t sxi = sx_int(c), dx = c->dx, nx = c->nx;
     uint32_t nx_max = (step == 4) ? (c->reg_nx & ~3u) : (step == 2) ? (c->reg_nx & ~1u) : c->reg_nx;
-    uint32_t n = ((nx_max - nx) & 0x7FFu) / step;
-    uint32_t r = room_on_screen(sxi, step, dix, c->wide);
-    if (r < n) n = r;
+    uint32_t n = kind == MM_YMMM ? 0x7FFu : ((nx_max - nx) & 0x7FFu) / step;
+    uint32_t r;
+    if (!fill) {
+        r = room_on_screen(sxi, step, dix, c->wide);
+        if (r < n) n = r;
+    }
     r = room_on_screen(dx, step, dix, c->wide);
     if (r < n) n = r;
     uint32_t nb = (budget - x->cost + px_cost - 1) / px_cost;
@@ -980,24 +989,52 @@ void mm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, b
     else             { srow = (sy & 0x3FFu) << 8; drow = (dy & 0x3FFu) << 8; }
     const int32_t st = dix ? -(int32_t)step : (int32_t)step;
     const unsigned lopc = c->lop;
+    const uint8_t color = c->color;
 
     uint32_t s = sxi, d = dx, i = 0;
+#define MM_DADDR(X) (layout == 0 ? drow | (((X) >> 1) & 0x7Fu) : layout == 1 ? drow | (((X) >> 2) & 0x7Fu) : \
+                     layout == 2 ? drow | (((X) >> 1) & 0xFFu) : drow | ((X) & 0xFFu))
+    if (fill && (kind == MM_HMMV || (imp && bpp == 8))) {
+        /* a fill of whole bytes (HMMV moves bytes; LMMV IMP in an 8-bit
+         * mode), if its bytes are consecutive (not with FG4's 4-pixel steps
+         * in G5, nor across the 256-pixel wrap of a narrow mode); with the
+         * interleave, the even bytes in one bank and the odd in the other */
+        uint32_t lo = dix ? d - (n - 1) * step : d, hi = lo + (n - 1) * step;
+        uint32_t alo = MM_DADDR(lo), ahi = MM_DADDR(hi);
+        if (ahi - alo == n - 1) {
+            if (!il) {
+                memset(vram + alo, color, n);
+            } else {
+                uint32_t e0 = (alo + 1) & ~1u, o0 = alo | 1u;        /* first even, first odd */
+                if (e0 <= ahi) memset(vram + v9968_phys(true, e0), color, (ahi - e0) / 2 + 1);
+                if (o0 <= ahi) memset(vram + v9968_phys(true, o0), color, (ahi - o0) / 2 + 1);
+            }
+            i = n;
+            s = (uint32_t)((int32_t)s + st * (int32_t)n);
+            d = (uint32_t)((int32_t)d + st * (int32_t)n);
+        }
+    }
+#undef MM_DADDR
     while (i < n) {
         uint32_t sa, da;
         if (layout == 0)      { sa = srow | ((s >> 1) & 0x7Fu); da = drow | ((d >> 1) & 0x7Fu); }
         else if (layout == 1) { sa = srow | ((s >> 2) & 0x7Fu); da = drow | ((d >> 2) & 0x7Fu); }
         else if (layout == 2) { sa = srow | ((s >> 1) & 0xFFu); da = drow | ((d >> 1) & 0xFFu); }
         else                  { sa = srow | (s & 0xFFu);        da = drow | (d & 0xFFu); }
-        sa = v9968_phys(il, sa);
         da = v9968_phys(il, da);
-        uint8_t b = vram[sa];
-        if (!lmmm) {
-            vram[da] = b;
+        if (kind == MM_HMMV) {
+            vram[da] = color;
+        } else if (kind == MM_HMMM || kind == MM_YMMM) {         /* YMMM: SX = DX */
+            vram[da] = vram[v9968_phys(il, sa)];
         } else {
             uint8_t src;
-            if (bpp == 4)      src = (s & 1) ? (b & 0x0F) : (b >> 4);
-            else if (bpp == 2) src = (b >> (6 - 2 * (s & 3))) & 3;
-            else               src = b;
+            if (kind == MM_LMMV) src = color;
+            else {
+                uint8_t b = vram[v9968_phys(il, sa)];
+                if (bpp == 4)      src = (s & 1) ? (b & 0x0F) : (b >> 4);
+                else if (bpp == 2) src = (b >> (6 - 2 * (s & 3))) & 3;
+                else               src = b;
+            }
             if (imp && bpp == 8) {
                 vram[da] = src;
             } else {
@@ -1038,28 +1075,48 @@ void mm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, b
     x->cost += n * px_cost;
 }
 
-V9968_HOT static void hmmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, false, false); }
-V9968_HOT static void hmmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, false, false); }
-V9968_HOT static void lmmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, true, true); }
-V9968_HOT static void lmmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, true, true); }
+V9968_HOT static void hmmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_HMMM, false); }
+V9968_HOT static void hmmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_HMMM, false); }
+V9968_HOT static void lmmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_LMMM, true); }
+V9968_HOT static void lmmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_LMMM, true); }
+V9968_HOT static void hmmv_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_HMMV, false); }
+V9968_HOT static void hmmv_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_HMMV, false); }
+V9968_HOT static void lmmv_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_LMMV, true); }
+V9968_HOT static void lmmv_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_LMMV, true); }
+V9968_HOT static void ymmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_YMMM, false); }
+V9968_HOT static void ymmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_YMMM, false); }
+/* G7 without sprite mode 3 (SCREEN 8 as on the V9958) is interleaved */
+V9968_HOT static void hmmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_HMMM, false); }
+V9968_HOT static void lmmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_LMMM, true); }
+V9968_HOT static void hmmv_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_HMMV, false); }
+V9968_HOT static void lmmv_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_LMMV, true); }
+V9968_HOT static void ymmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_YMMM, false); }
 V9968_HOT static void __attribute__((noinline))
-mm_any(ctx_t *x, unsigned b, unsigned layout, bool il, bool lmmm) {
-    mm_row(x, b, layout, x->bpp, il, lmmm, false);
+mm_any(ctx_t *x, unsigned b, unsigned layout, bool il, unsigned kind) {
+    mm_row(x, b, layout, x->bpp, il, kind, false);
 }
 
 V9968_HOT static void mm_run(ctx_t *x, unsigned budget) {
     v9968_cmd_state_t *c = x->c;
     unsigned layout = x->g4 ? 0 : x->g5 ? 1 : x->g6 ? 2 : 3;
-    bool il = x->interleave, lmmm = c->state == ST_LMMM;
+    bool il = x->interleave;
     uint8_t state = c->state;
+    unsigned kind = state == ST_LMMM ? MM_LMMM : state == ST_HMMV ? MM_HMMV :
+                    state == ST_LMMV ? MM_LMMV : state == ST_YMMM ? MM_YMMM : MM_HMMM;
     void (*fast)(ctx_t *, unsigned) = NULL;
-    if (!il && x->bpp == (layout == 0 ? 4u : 8u) && (layout == 0 || layout == 3) &&
-        (!lmmm || c->lop == 0))
-        fast = layout == 0 ? (lmmm ? lmmm_g4 : hmmm_g4) : (lmmm ? lmmm_g7 : hmmm_g7);
+    if (x->bpp == (layout == 0 ? 4u : 8u) && ((layout == 0 && !il) || layout == 3) &&
+        ((kind != MM_LMMM && kind != MM_LMMV) || c->lop == 0)) {
+        static void (*const tab[5][3])(ctx_t *, unsigned) = {
+            [MM_HMMM] = { hmmm_g4, hmmm_g7, hmmm_g7i }, [MM_LMMM] = { lmmm_g4, lmmm_g7, lmmm_g7i },
+            [MM_HMMV] = { hmmv_g4, hmmv_g7, hmmv_g7i }, [MM_LMMV] = { lmmv_g4, lmmv_g7, lmmv_g7i },
+            [MM_YMMM] = { ymmm_g4, ymmm_g7, ymmm_g7i },
+        };
+        fast = tab[kind][layout == 0 ? 0 : il ? 2 : 1];
+    }
 
     while (c->state == state && x->cost < budget) {
         if (fast) fast(x, budget);
-        else      mm_any(x, budget, layout, il, lmmm);
+        else      mm_any(x, budget, layout, il, kind);
         if (x->cost >= budget || yield_now(x, x->cost)) break;
         step_one(x);                    /* the row's last pixel, or at the edge */
     }
@@ -1246,7 +1303,8 @@ V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget) {
     make_ctx(&x, v);
     if (!v9968_cmd_reference) {
         if (v->cmd.state == ST_LRMM) lrmm_run(&x, budget);
-        else if (v->cmd.state == ST_LMMM || (v->cmd.state == ST_HMMM && v->cmd.op == OP_HMMM))
+        else if (v->cmd.state == ST_LMMM || (v->cmd.state == ST_HMMM && v->cmd.op == OP_HMMM) ||
+                 v->cmd.state == ST_HMMV || v->cmd.state == ST_LMMV || v->cmd.state == ST_YMMM)
             mm_run(&x, budget);
         else if (v->cmd.state == ST_LINE) line_run(&x, budget);
     }
