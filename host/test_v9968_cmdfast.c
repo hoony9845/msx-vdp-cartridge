@@ -87,7 +87,8 @@ int main(int argc, char **argv) {
     static geo3d_t geo_a, geo_b;
     v9968_init(&va, vram_a, &geo_a);
     v9968_init(&vb, vram_b, &geo_b);
-    for (unsigned i = 0; i < V9968_VRAM_SIZE; i++) vram_a[i] = (uint8_t)rnd();
+    /* a quarter of the bytes 0: transparent sources for the T-ops */
+    for (unsigned i = 0; i < V9968_VRAM_SIZE; i++) vram_a[i] = (rnd() & 3) ? (uint8_t)rnd() : 0;
 
     for (unsigned n = 0; n < count; n++) {
         memcpy(vram_b, vram_a, V9968_VRAM_SIZE);
@@ -104,6 +105,7 @@ int main(int argc, char **argv) {
         unsigned ny = (rnd() & 3) == 0 ? 0 : (rnd() % 40);   /* NY = 0: horizontal LINEs */
         wr(40, (uint8_t)nx); wr(41, (uint8_t)(nx >> 8));
         wr(42, (uint8_t)ny); wr(43, (uint8_t)(ny >> 8));
+        if (rnd() & 1) { wr(33, 0); wr(37, 0); }        /* SX, DX inside 256 pixels */
         if ((rnd() & 7) == 0) { wr(38, 0); wr(39, 0); }  /* DY at the edges */
         if ((rnd() & 7) == 0) {                          /* DX at the edges */
             static const uint16_t ex[4] = { 0, 255, 256, 511 };
@@ -124,7 +126,9 @@ int main(int argc, char **argv) {
         wr(45, (uint8_t)rnd());                          /* DIX/DIY/XHR/FG4 ... */
         static const uint8_t ops[7] = { 0x30, 0x90, 0xD0, 0x70, 0xC0, 0x80, 0xE0 };
         uint8_t op = ops[rnd() % 7];             /* LRMM LMMM HMMM LINE HMMV LMMV YMMM */
-        wr(46, (uint8_t)(op | ((rnd() & 1) ? 0 : (rnd() & 0x0F))));     /* IMP half the time */
+        unsigned lo = (rnd() & 1) ? 0 : (rnd() & 1) ? 8 : (rnd() & 0x0F);   /* IMP, TIMP, any */
+        if (lo == 8 && (rnd() & 3) == 0) wr(44, 0);                          /* TIMP colour 0 */
+        wr(46, (uint8_t)(op | lo));
 
         /* the first destination bytes (layout as G4/G7 without interleave) */
         unsigned dxw = vb.cmd.reg_dx, dyw = vb.cmd.dy;

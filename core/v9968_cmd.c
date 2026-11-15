@@ -737,7 +737,7 @@ uint8_t lrmm_src(const uint8_t *vram, uint32_t sx, uint32_t sy, unsigned layout,
 
 static inline __attribute__((always_inline))
 void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, bool xhr,
-              bool imp) {
+              bool imp, bool timp) {
     v9968_cmd_state_t *c = x->c;
     const unsigned px_cost = x->hs ? COST_READ_HS * 2 + COST_WRITE_HS : COST_ACCESS_SLOW * 3;
     if (x->cost >= budget) return;
@@ -806,12 +806,11 @@ void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il,
             i += 2;
         } else {
             uint8_t src = SRC();
-            uint8_t out;
-            if (imp && bpp == 8) {
-                out = src;
+            if ((imp || timp) && bpp == 8) {
+                if (!timp || src) vram[da] = src;           /* TIMP keeps it for 0 */
             } else {
-                uint8_t base = vram[da];
-                unsigned op = imp ? 0 : lopc;
+                uint8_t base = vram[da], out;
+                unsigned op = imp ? 0 : timp ? 8 : lopc;
                 if (bpp == 4) {
                     uint8_t dp = (d & 1) ? (base & 0x0F) : (base >> 4);
                     uint8_t p = lop(op, src, dp);
@@ -824,8 +823,8 @@ void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il,
                 } else {
                     out = lop(op, src, base);
                 }
+                vram[da] = out;
             }
-            vram[da] = out;
             STEP();
             d = (uint32_t)((int32_t)d + dstep);
             i++;
@@ -852,13 +851,18 @@ void lrmm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il,
 
 /* The copies for the screen modes and LOP the demos use; the rest run the
  * general one. */
-V9968_HOT static void lrmm_g4(ctx_t *x, unsigned b)     { lrmm_row(x, b, 0, 4, false, false, true); }
-V9968_HOT static void lrmm_fg4(ctx_t *x, unsigned b)    { lrmm_row(x, b, 0, 8, false, false, true); }
-V9968_HOT static void lrmm_g7(ctx_t *x, unsigned b)     { lrmm_row(x, b, 3, 8, false, false, true); }
-V9968_HOT static void lrmm_g7_il(ctx_t *x, unsigned b)  { lrmm_row(x, b, 3, 8, true, false, true); }
+V9968_HOT static void lrmm_g4(ctx_t *x, unsigned b)     { lrmm_row(x, b, 0, 4, false, false, true, false); }
+V9968_HOT static void lrmm_fg4(ctx_t *x, unsigned b)    { lrmm_row(x, b, 0, 8, false, false, true, false); }
+V9968_HOT static void lrmm_g7(ctx_t *x, unsigned b)     { lrmm_row(x, b, 3, 8, false, false, true, false); }
+V9968_HOT static void lrmm_g7_il(ctx_t *x, unsigned b)  { lrmm_row(x, b, 3, 8, true, false, true, false); }
+/* TIMP (geo3d's textured faces, sprites drawn by copies) */
+V9968_HOT static void lrmm_g4t(ctx_t *x, unsigned b)    { lrmm_row(x, b, 0, 4, false, false, false, true); }
+V9968_HOT static void lrmm_fg4t(ctx_t *x, unsigned b)   { lrmm_row(x, b, 0, 8, false, false, false, true); }
+V9968_HOT static void lrmm_g7t(ctx_t *x, unsigned b)    { lrmm_row(x, b, 3, 8, false, false, false, true); }
+V9968_HOT static void lrmm_g7_ilt(ctx_t *x, unsigned b) { lrmm_row(x, b, 3, 8, true, false, false, true); }
 V9968_HOT static void __attribute__((noinline))
 lrmm_any(ctx_t *x, unsigned b, unsigned layout, bool il, bool xhr) {
-    lrmm_row(x, b, layout, x->bpp, il, xhr, false);
+    lrmm_row(x, b, layout, x->bpp, il, xhr, false, false);
 }
 
 /* A row's last pixel (NX = R#40), as step_one does it: the source (or
@@ -920,9 +924,12 @@ V9968_HOT static void lrmm_run(ctx_t *x, unsigned budget) {
     unsigned layout = x->g4 ? 0 : x->g5 ? 1 : x->g6 ? 2 : 3;
     bool il = x->interleave, xhr = arg_xhr(x);
     void (*fast)(ctx_t *, unsigned) = NULL;
-    if (c->lop == 0 && !xhr) {
-        if (!il && layout == 0) fast = x->bpp == 4 ? lrmm_g4 : x->bpp == 8 ? lrmm_fg4 : NULL;
-        else if (layout == 3 && x->bpp == 8) fast = il ? lrmm_g7_il : lrmm_g7;
+    if ((c->lop == 0 || c->lop == 8) && !xhr) {
+        bool t = c->lop == 8;
+        if (!il && layout == 0)
+            fast = x->bpp == 4 ? (t ? lrmm_g4t : lrmm_g4) : x->bpp == 8 ? (t ? lrmm_fg4t : lrmm_fg4) : NULL;
+        else if (layout == 3 && x->bpp == 8)
+            fast = il ? (t ? lrmm_g7_ilt : lrmm_g7_il) : (t ? lrmm_g7t : lrmm_g7);
     }
 
     while (c->state == ST_LRMM && x->cost < budget) {
@@ -955,7 +962,8 @@ enum { MM_HMMM, MM_LMMM, MM_HMMV, MM_LMMV, MM_YMMM };
  * fills read no source and SX does not end their rows (not sx_active); a
  * YMMM row ends only at the edge (no nx_end), its source X being DX. */
 static inline __attribute__((always_inline))
-void mm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, unsigned kind, bool imp) {
+void mm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, unsigned kind, bool imp,
+            bool timp) {
     v9968_cmd_state_t *c = x->c;
     const bool lmmm = kind == MM_LMMM, fill = kind == MM_HMMV || kind == MM_LMMV;
     unsigned px_cost = lmmm ? (x->hs ? COST_READ_HS * 2 + COST_WRITE_HS : COST_ACCESS_SLOW * 3)
@@ -1037,11 +1045,11 @@ void mm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, u
                 else if (bpp == 2) src = (b >> (6 - 2 * (s & 3))) & 3;
                 else               src = b;
             }
-            if (imp && bpp == 8) {
-                vram[da] = src;
+            if ((imp || timp) && bpp == 8) {
+                if (!timp || src) vram[da] = src;           /* TIMP keeps it for 0 */
             } else {
                 uint8_t base = vram[da];
-                unsigned op = imp ? 0 : lopc;
+                unsigned op = imp ? 0 : timp ? 8 : lopc;
                 uint8_t out;
                 if (bpp == 4) {
                     uint8_t dp = (d & 1) ? (base & 0x0F) : (base >> 4);
@@ -1077,25 +1085,29 @@ void mm_row(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool il, u
     x->cost += n * px_cost;
 }
 
-V9968_HOT static void hmmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_HMMM, false); }
-V9968_HOT static void hmmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_HMMM, false); }
-V9968_HOT static void lmmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_LMMM, true); }
-V9968_HOT static void lmmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_LMMM, true); }
-V9968_HOT static void hmmv_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_HMMV, false); }
-V9968_HOT static void hmmv_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_HMMV, false); }
-V9968_HOT static void lmmv_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_LMMV, true); }
-V9968_HOT static void lmmv_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_LMMV, true); }
-V9968_HOT static void ymmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_YMMM, false); }
-V9968_HOT static void ymmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_YMMM, false); }
+V9968_HOT static void hmmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_HMMM, false, false); }
+V9968_HOT static void hmmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_HMMM, false, false); }
+V9968_HOT static void lmmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_LMMM, true, false); }
+V9968_HOT static void lmmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_LMMM, true, false); }
+V9968_HOT static void hmmv_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_HMMV, false, false); }
+V9968_HOT static void hmmv_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_HMMV, false, false); }
+V9968_HOT static void lmmv_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_LMMV, true, false); }
+V9968_HOT static void lmmv_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_LMMV, true, false); }
+V9968_HOT static void ymmm_g4(ctx_t *x, unsigned b)    { mm_row(x, b, 0, 4, false, MM_YMMM, false, false); }
+V9968_HOT static void ymmm_g7(ctx_t *x, unsigned b)    { mm_row(x, b, 3, 8, false, MM_YMMM, false, false); }
 /* G7 without sprite mode 3 (SCREEN 8 as on the V9958) is interleaved */
-V9968_HOT static void hmmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_HMMM, false); }
-V9968_HOT static void lmmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_LMMM, true); }
-V9968_HOT static void hmmv_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_HMMV, false); }
-V9968_HOT static void lmmv_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_LMMV, true); }
-V9968_HOT static void ymmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_YMMM, false); }
+V9968_HOT static void hmmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_HMMM, false, false); }
+V9968_HOT static void lmmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_LMMM, true, false); }
+V9968_HOT static void hmmv_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_HMMV, false, false); }
+V9968_HOT static void lmmv_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_LMMV, true, false); }
+V9968_HOT static void ymmm_g7i(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, true, MM_YMMM, false, false); }
+/* LMMM with TIMP (sprites drawn by copies); LMMV TIMP is IMP but for 0 */
+V9968_HOT static void lmmm_g4t(ctx_t *x, unsigned b)   { mm_row(x, b, 0, 4, false, MM_LMMM, false, true); }
+V9968_HOT static void lmmm_g7t(ctx_t *x, unsigned b)   { mm_row(x, b, 3, 8, false, MM_LMMM, false, true); }
+V9968_HOT static void lmmm_g7it(ctx_t *x, unsigned b)  { mm_row(x, b, 3, 8, true, MM_LMMM, false, true); }
 V9968_HOT static void __attribute__((noinline))
 mm_any(ctx_t *x, unsigned b, unsigned layout, bool il, unsigned kind) {
-    mm_row(x, b, layout, x->bpp, il, kind, false);
+    mm_row(x, b, layout, x->bpp, il, kind, false, false);
 }
 
 V9968_HOT static void mm_run(ctx_t *x, unsigned budget) {
@@ -1106,14 +1118,19 @@ V9968_HOT static void mm_run(ctx_t *x, unsigned budget) {
     unsigned kind = state == ST_LMMM ? MM_LMMM : state == ST_HMMV ? MM_HMMV :
                     state == ST_LMMV ? MM_LMMV : state == ST_YMMM ? MM_YMMM : MM_HMMM;
     void (*fast)(ctx_t *, unsigned) = NULL;
+    /* LMMV with a T-op and a colour other than 0 is IMP */
+    bool imp = c->lop == 0 || (kind == MM_LMMV && (c->lop & 8) && (c->lop & 7) == 0 && c->color != 0);
+    bool timp = !imp && c->lop == 8 && kind == MM_LMMM;
     if (x->bpp == (layout == 0 ? 4u : 8u) && ((layout == 0 && !il) || layout == 3) &&
-        ((kind != MM_LMMM && kind != MM_LMMV) || c->lop == 0)) {
+        ((kind != MM_LMMM && kind != MM_LMMV) || imp || timp)) {
         static void (*const tab[5][3])(ctx_t *, unsigned) = {
             [MM_HMMM] = { hmmm_g4, hmmm_g7, hmmm_g7i }, [MM_LMMM] = { lmmm_g4, lmmm_g7, lmmm_g7i },
             [MM_HMMV] = { hmmv_g4, hmmv_g7, hmmv_g7i }, [MM_LMMV] = { lmmv_g4, lmmv_g7, lmmv_g7i },
             [MM_YMMM] = { ymmm_g4, ymmm_g7, ymmm_g7i },
         };
-        fast = tab[kind][layout == 0 ? 0 : il ? 2 : 1];
+        static void (*const ttab[3])(ctx_t *, unsigned) = { lmmm_g4t, lmmm_g7t, lmmm_g7it };
+        unsigned col = layout == 0 ? 0 : il ? 2 : 1;
+        fast = timp ? ttab[col] : tab[kind][col];
     }
 
     while (c->state == state && x->cost < budget) {
