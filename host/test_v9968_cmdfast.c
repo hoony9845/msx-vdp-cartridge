@@ -25,6 +25,58 @@ static void wr(unsigned reg, uint8_t d) {
     v9968_cmd_write_reg(&vb, reg, d);
 }
 
+/* v9968_geo_line against geo3d's LINE written register by register and run
+ * by v9968_cmd_step: same VDP state, VRAM and clocks, or (when it does not
+ * apply) nothing changed. Returns the number of LINEs it ran. */
+static unsigned long test_geo_line(unsigned count) {
+    static const uint8_t mode_r0[5] = { 0x06, 0x0E, 0x0E, 0x08, 0x0A };   /* G4 G7 G7 G5 G6 */
+    unsigned long ran = 0;
+    for (unsigned n = 0; n < count; n++) {
+        unsigned m = rnd() % 5;
+        va.regs[0] = vb.regs[0] = mode_r0[m];
+        va.regs[1] = vb.regs[1] = 0;
+        va.regs[20] = vb.regs[20] = (uint8_t)((rnd() & 1) | ((rnd() & 3) == 0 ? 0 : 0x08));  /* HS, SP3 */
+        va.regs[21] = vb.regs[21] = (uint8_t)((rnd() & 7) == 0);                            /* V58 */
+        for (unsigned r = 32; r <= 58; r++) if (r != 46) wr(r, (uint8_t)rnd());
+        uint8_t b[11];
+        for (unsigned i = 0; i < 11; i++) b[i] = (uint8_t)rnd();
+        unsigned dx = (rnd() & 3) ? rnd() % 256 : rnd() % 512, nx = (rnd() & 3) ? rnd() % 40 : rnd() % 300;
+        b[0] = (uint8_t)dx; b[1] = (uint8_t)(dx >> 8); b[4] = (uint8_t)nx; b[5] = (uint8_t)(nx >> 8);
+        if (rnd() & 7) { b[6] = 0; b[7] = (rnd() & 1) ? 0 : 0xF8; }    /* NY = 0 (high bits ignored) */
+        if (rnd() & 7) b[9] = 0;
+        static const uint8_t lops[6] = { 0, 8, 0, 8, 3, 9 };
+        b[10] = (uint8_t)(((rnd() & 15) == 0 ? (rnd() & 0xF0) : 0x70) | lops[rnd() % 6]);
+        if ((rnd() & 3) == 0) b[8] = (uint8_t)((rnd() & 1) ? 0 : 0x10);
+        memcpy(vram_b, vram_a, V9968_VRAM_SIZE);
+        vb.cmd = va.cmd;
+        unsigned budget = (rnd() & 3) ? (1u << 20) : rnd() % 2000;
+        v9968_t before = vb;
+        unsigned cost = v9968_geo_line(&vb, b, budget);
+        if (cost == V9968_GEO_LINE_NO) {
+            if (memcmp(&before, &vb, sizeof vb) || memcmp(vram_a, vram_b, V9968_VRAM_SIZE)) {
+                printf("FAIL geo_line %u: changed the state although it did not apply\n", n);
+                exit(1);
+            }
+            continue;
+        }
+        ran++;
+        for (unsigned k = 0; k < 11; k++) v9968_cmd_write_reg(&va, geo3d_command_reg(11, k), b[k]);
+        unsigned long used = 0;
+        for (int i = 0; i < 100000 && v9968_cmd_busy(&va); i++) used += v9968_cmd_step(&va, 1u << 20);
+        if (used != cost || memcmp(&va.cmd, &vb.cmd, sizeof va.cmd) || va.int_flags != vb.int_flags ||
+            memcmp(vram_a, vram_b, V9968_VRAM_SIZE)) {
+            printf("FAIL geo_line %u (mode %02x dx %u nx %u lop %x color %02x): clocks %lu / %u\n",
+                   n, va.regs[0], dx, nx, b[10] & 15, b[8], used, cost);
+            const uint8_t *pa = (const uint8_t *)&va.cmd, *pb = (const uint8_t *)&vb.cmd;
+            for (unsigned o = 0; o < sizeof(va.cmd); o++)
+                if (pa[o] != pb[o]) printf("  cmd byte %u: %02x / %02x\n", o, pa[o], pb[o]);
+            exit(1);
+        }
+        va.int_flags = vb.int_flags = 0;
+    }
+    return ran;
+}
+
 int main(int argc, char **argv) {
     unsigned count = argc > 1 ? (unsigned)atoi(argv[1]) : 3000;
     rng = argc > 2 ? (uint32_t)atoi(argv[2]) : 12345u;
@@ -118,6 +170,9 @@ int main(int argc, char **argv) {
     v9968_cmd_watch = NULL;
     printf("test_v9968_cmdfast: %u commands identical (%lu clocks, %lu early stops)\n",
            count, pixels, yields);
+    unsigned long geo = test_geo_line(count * 10);
+    printf("test_v9968_cmdfast: v9968_geo_line identical (%lu of %u LINEs applied)\n", geo, count * 10);
+    if (geo < count) { printf("FAIL: v9968_geo_line applied too rarely\n"); return 1; }
     if (yields == 0) { printf("FAIL: v9968_cmd_watch never stopped a command\n"); return 1; }
     return 0;
 }
