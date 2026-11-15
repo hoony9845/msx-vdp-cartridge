@@ -18,7 +18,7 @@ static inline int64_t floor_div(int64_t a, int64_t b) {
     if (a == (int32_t)a && b == (int32_t)b && a != INT32_MIN) {
         int32_t a32 = (int32_t)a, b32 = (int32_t)b;
         int32_t q32 = a32 / b32;
-        if ((a32 % b32 != 0) && ((a32 < 0) != (b32 < 0))) q32--;
+        if ((a32 - q32 * b32 != 0) && ((a32 < 0) != (b32 < 0))) q32--;   /* one SDIV */
         return q32;
     }
     int64_t q = a / b;
@@ -275,34 +275,48 @@ static unsigned flat_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, u
  * bits where the values fit (x, u, v), 64 for the products. */
 static unsigned tex_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, uint8_t *b) {
     const int32_t *xs = g->fx, *ys = g->fy, *us = g->fu, *vs = g->fv;
-    int32_t lx = 0, lu = 0, lv = 0, rx = 0, ru = 0, rv = 0;
+    /* The candidates' x first, remembering which they are (edge k * 4 +
+     * 0 its crossing, 1 its first corner, 2 its second): an empty row
+     * needs no u, v, and the others only the two chosen ones'. */
+    int32_t lx = 0, rx = 0;
+    unsigned li = 0, ri = 0;
     bool set = false;
-#define CAND(X, U, V) do { int32_t x_ = (X), u_ = (U), v_ = (V); \
-        if (!set || x_ < lx) { lx = x_; lu = u_; lv = v_; } \
-        if (!set || x_ > rx) { rx = x_; ru = u_; rv = v_; } \
+#define PICK(X, ID) do { int32_t x_ = (X); \
+        if (!set || x_ < lx) { lx = x_; li = (ID); } \
+        if (!set || x_ > rx) { rx = x_; ri = (ID); } \
         set = true; } while (0)
     for (int k = 0; k < 4; k++) {
         int a = k, c = (k + 1) & 3;
         int32_t ya = ys[a], yc = ys[c];
         if (ya == yc) {
             if (y != ya) continue;
-            CAND(xs[a], us[a] * 256, vs[a] * 256);
-            CAND(xs[c], us[c] * 256, vs[c] * 256);
+            PICK(xs[a], 4u * k + 1);
+            PICK(xs[c], 4u * k + 2);
         } else {
             int32_t lo = ya < yc ? ya : yc, hi = ya < yc ? yc : ya;
             if (y < lo || y > hi) continue;
             int32_t dy = y - ya, den = yc - ya;
-            int32_t x = xs[a] + (int32_t)floor_div((int64_t)dy * (xs[c] - xs[a]), den);
-            int32_t u = us[a] * 256 + (int32_t)floor_div((int64_t)dy * ((us[c] - us[a]) * 256), den);
-            int32_t v = vs[a] * 256 + (int32_t)floor_div((int64_t)dy * ((vs[c] - vs[a]) * 256), den);
-            CAND(x, u, v);
+            PICK(xs[a] + (int32_t)floor_div((int64_t)dy * (xs[c] - xs[a]), den), 4u * k);
         }
     }
-#undef CAND
+#undef PICK
     if (!set) return 0;
     int32_t w = g->cfg[16];
     int32_t cl = lx > 0 ? lx : 0, cr = rx < w - 1 ? rx : w - 1;
     if (cl > cr) return 0;
+    int32_t lu, lv, ru, rv;
+    for (int side = 0; side < 2; side++) {
+        unsigned id = side ? ri : li;
+        int a = (int)(id >> 2), c = (a + 1) & 3, u, v;
+        if ((id & 3) == 1)      { u = us[a] * 256; v = vs[a] * 256; }
+        else if ((id & 3) == 2) { u = us[c] * 256; v = vs[c] * 256; }
+        else {
+            int32_t dy = y - ys[a], den = ys[c] - ys[a];
+            u = us[a] * 256 + (int32_t)floor_div((int64_t)dy * ((us[c] - us[a]) * 256), den);
+            v = vs[a] * 256 + (int32_t)floor_div((int64_t)dy * ((vs[c] - vs[a]) * 256), den);
+        }
+        if (side) { ru = u; rv = v; } else { lu = u; lv = v; }
+    }
     unsigned dy = (unsigned)((y + g->ypage) & 0x7FF);
     int64_t du = 0, dv = 0;
     if (rx != lx) {
