@@ -56,3 +56,15 @@ add_executable(test_v9968_cmdfast test_v9968_cmdfast.c)
 target_link_libraries(test_v9968_cmdfast v9990_core)
 target_compile_options(test_v9968_cmdfast PRIVATE -Wall -Wextra)
 add_test(NAME test_v9968_cmdfast COMMAND test_v9968_cmdfast)
+
+# internals: these include the core source they test (its static functions)
+add_executable(test_geo3d_internal test_geo3d_internal.c)
+target_include_directories(test_geo3d_internal PRIVATE ${CORE_DIR})
+target_compile_options(test_geo3d_internal PRIVATE -Wall -Wextra -O2)
+add_test(NAME test_geo3d_internal COMMAND test_geo3d_internal)
+
+add_executable(test_v9968_cmdregs test_v9968_cmdregs.c
+    ${CORE_DIR}/v9968.c ${CORE_DIR}/v9968_render.c ${CORE_DIR}/geo3d.c)
+target_include_directories(test_v9968_cmdregs PRIVATE ${CORE_DIR})
+target_compile_options(test_v9968_cmdregs PRIVATE -Wall -Wextra -O2)
+add_test(NAME test_v9968_cmdregs COMMAND test_v9968_cmdregs)
