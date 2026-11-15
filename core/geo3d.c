@@ -204,13 +204,19 @@ static void face_rows(geo3d_t *g, const geo3d_vis_t *vis) {
         g->fu[k] = g->ftex ? uv[2 * k] : 0;
         g->fv[k] = g->ftex ? uv[2 * k + 1] : 0;
     }
+    int32_t xmin = 32767, xmax = -32768;
     for (int k = 0; k < 4; k++) {
-        int32_t y = g->fy[k];
+        int32_t y = g->fy[k], x = g->fx[k];
         if (y < ymin) ymin = y;
         if (y > ymax) ymax = y;
+        if (x < xmin) xmin = x;
+        if (x > xmax) xmax = x;
     }
     g->row = ymin < 0 ? 0 : ymin;
     g->row_end = ymax < g->cfg[17] - 1 ? ymax : g->cfg[17] - 1;
+    /* Wholly left or right of the screen, every row's span is empty (the
+     * crossings lie between the corners' x): skip the rows. */
+    if (xmax < 0 || xmin > g->cfg[16] - 1) g->row_end = g->row - 1;
 }
 
 /* A row of an untextured face: only the leftmost and rightmost edge
@@ -360,13 +366,16 @@ unsigned geo3d_next_command(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX]) {
         int32_t seg[4] = { s[0], s[1], s[2], s[3] };
         return line_bytes(g, seg, bytes);
     }
+    unsigned work = 0;
     while (g->next_item < g->nvis) {
         const geo3d_vis_t *vis = &g->vis[g->next_item];
         while (g->row <= g->row_end) {
             unsigned n = face_span(g, vis, g->row++, bytes);
             if (n) return n;
+            if (++work >= GEO3D_WORK) return GEO3D_AGAIN;
         }
         if (++g->next_item < g->nvis) face_rows(g, &g->vis[g->next_item]);
+        if (++work >= GEO3D_WORK && g->next_item < g->nvis) return GEO3D_AGAIN;
     }
     return 0;
 }

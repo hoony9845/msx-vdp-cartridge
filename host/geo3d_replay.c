@@ -39,6 +39,7 @@ int main(int argc, char **argv) {
             uint8_t c[GEO3D_CMD_MAX];
             unsigned n;
             while ((n = geo3d_next_command(&geo, c)) != 0) {
+                if (n == GEO3D_AGAIN) continue;
                 putchar(n == GEO3D_CMD_MAX ? 'M' : 'L');
                 for (unsigned k = 0; k < n; k++) printf(" %02x", c[k]);
                 putchar('\n');

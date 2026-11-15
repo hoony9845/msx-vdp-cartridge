@@ -91,7 +91,12 @@ void geo3d_read_data(geo3d_t *g);                       /* advance rptr */
 
 /* Next VDP command of the RUN: writes the register values (in issue order,
  * see geo3d_command_reg) to `bytes` and returns 11 (LINE) or 19 (LRMM); 0
- * when the RUN has nothing left to draw. */
+ * when the RUN has nothing left to draw; GEO3D_AGAIN (no command, still
+ * running) after passing GEO3D_WORK empty rows and faces, so that one call
+ * takes bounded time (~1 ms otherwise, over faces off the screen) and the
+ * caller can serve the bus before it asks again. */
+#define GEO3D_AGAIN 1u
+#define GEO3D_WORK  32u
 unsigned geo3d_next_command(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX]);
 static inline unsigned geo3d_command_reg(unsigned len, unsigned k) {
     if (len != GEO3D_CMD_MAX) return 36 + k;

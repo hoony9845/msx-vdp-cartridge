@@ -32,7 +32,8 @@ static void run_cmd(void) {
         if (geo_log && vdp.geo->running && !v9968_cmd_busy(&vdp)) {
             /* issue the command here to log it (what v9968_service does) */
             uint8_t b[GEO3D_CMD_MAX];
-            unsigned n = geo3d_next_command(vdp.geo, b);
+            unsigned n;
+            while ((n = geo3d_next_command(vdp.geo, b)) == GEO3D_AGAIN) { }
             if (n == 0) vdp.geo->running = false;
             for (unsigned k = 0; k < n; k++) {
                 unsigned r = geo3d_command_reg(n, k);

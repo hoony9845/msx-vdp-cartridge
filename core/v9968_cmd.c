@@ -1421,6 +1421,7 @@ V9968_HOT unsigned v9968_service(v9968_t *v, unsigned budget) {
         if (g->running && v->cmd.state == ST_IDLE) {
             uint8_t b[GEO3D_CMD_MAX];
             unsigned n = geo3d_next_command(g, b);
+            if (n == GEO3D_AGAIN) return used;      /* back to the bus, then on */
             if (n == 0) g->running = false;
             if (n == 11 && geo3d_command_reg(n, 0) == 36) {
                 unsigned cost = v9968_geo_line(v, b, budget - used);
