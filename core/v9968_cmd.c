@@ -12,8 +12,10 @@
  *
  * Speed: every VRAM access costs clocks of the 85.9MHz engine clock; the
  * caller hands in a budget in the same unit. The compatible-speed waits
- * ({40, 2'b11} clocks per access) and the high-speed figures measured on
- * the RTL (LINE about 7, LRMM about 12 clocks per pixel) are approximated.
+ * ({40, 2'b11} clocks per access) are followed; the high-speed costs
+ * (read 4, write 3) are faster than the RTL: tools/compare/v9968/rtl/
+ * tb_time.v, with the cartridge's VRAM slots, takes 1.4-2.5 times these
+ * clocks (LINE 11-18 a pixel, LRMM 16-21, PSET 33-41 a command).
  *
  * Follows HRA!'s V9968 RTL (Copyright (C) 2025 Takayuki Hara) and is
  * distributed under its conditions, including the non-commercial clause;

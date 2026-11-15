@@ -8,6 +8,9 @@
  *   S              wait for TR (or the end), log S#7, read it (LMCM)
  *   E              wait for the end, log S#7, BD and S#8/S#9
  *
+ * With V9968_LOG_CLOCKS set, "E" logs the clocks the timing model charged
+ * since the last "E" instead (tools/compare/v9968/rtl/tb_time.v's format).
+ *
  * Usage: v9968_cmd_replay <mode 0-9> <v256> <hs> <R#12> init.hex cmds.txt dump.hex log.txt
  *   mode: 0-6 GRAPHIC1-7, 7 TEXT1, 8 TEXT2, 9 MULTICOLOR
  */
@@ -21,10 +24,14 @@ static v9968_t vdp;
 static const uint8_t mode_r0[10] = { 0x00, 0x02, 0x04, 0x06, 0x08, 0x0A, 0x0E, 0x00, 0x04, 0x00 };
 static const uint8_t mode_r1[10] = { 0, 0, 0, 0, 0, 0, 0, 0x10, 0x10, 0x08 };
 
+static unsigned long clocks;               /* charged since the last "E" */
+
 /* Run until the command ends or waits for the CPU. */
 static void run(void) {
     for (int i = 0; i < 10000000 && v9968_cmd_busy(&vdp); i++) {
-        if (!v9968_cmd_step(&vdp, 1u << 16)) break;      /* waiting for the CPU */
+        unsigned used = v9968_cmd_step(&vdp, 1u << 16);
+        clocks += used;
+        if (!used) break;                                 /* waiting for the CPU */
     }
 }
 
@@ -81,8 +88,12 @@ int main(int argc, char **argv) {
             break;
         case 'E':
             run();
-            fprintf(log, "E %02x %d %03x\n", vdp.cmd.status_color, vdp.cmd.border_detect,
-                    (unsigned)((vdp.cmd.sx >> 8) & 0x1FF));
+            if (getenv("V9968_LOG_CLOCKS"))
+                fprintf(log, "E %lu\n", clocks);
+            else
+                fprintf(log, "E %02x %d %03x\n", vdp.cmd.status_color, vdp.cmd.border_detect,
+                        (unsigned)((vdp.cmd.sx >> 8) & 0x1FF));
+            clocks = 0;
             break;
         default:
             break;
