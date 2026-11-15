@@ -69,6 +69,9 @@ typedef struct {
 
     /* RUN in progress */
     bool     running;
+    uint8_t  phase;                 /* GEO3D_PH_*: setup steps, then drawing */
+    uint16_t step;                  /* the vertex / face / edge / heap step */
+    int64_t  lm[3];                 /* the light in model space (faces) */
     bool     faces, textured;
     uint16_t next_item;             /* edge k, or index into vis[] */
     uint16_t nvis;
@@ -97,6 +100,12 @@ void geo3d_read_data(geo3d_t *g);                       /* advance rptr */
  * caller can serve the bus before it asks again. */
 #define GEO3D_AGAIN 1u
 #define GEO3D_WORK  32u
+/* A RUN's setup is spread over the calls too (GEO3D_SETUP steps a call),
+ * so that the RUN write itself returns at once: the transform, the face
+ * classification or edge clipping, the painter's sort (a heap sort, made
+ * of single sift-downs; the order is total, so any sort gives qsort's). */
+#define GEO3D_SETUP 16u
+enum { GEO3D_PH_XFORM, GEO3D_PH_CLASSIFY, GEO3D_PH_HEAPIFY, GEO3D_PH_SORT, GEO3D_PH_DRAW };
 unsigned geo3d_next_command(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX]);
 static inline unsigned geo3d_command_reg(unsigned len, unsigned k) {
     if (len != GEO3D_CMD_MAX) return 36 + k;

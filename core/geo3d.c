@@ -158,39 +158,51 @@ static int cmp_vis(const void *a, const void *b) {
     return (int)x->face - (int)y->face;                      /* then lower face */
 }
 
-static void classify_faces(geo3d_t *g) {
+static void light_model(geo3d_t *g) {
     const int32_t *m = g->cfg;
-    int64_t lm[3];
     for (int j = 0; j < 3; j++) {
-        int64_t s = 0;
-        for (int i = 0; i < 3; i++) s += (int64_t)m[3 * i + j] * g->light[i];
-        lm[j] = sat64(asr(s, 14), -131071, 131071);
+        int64_t sum = 0;
+        for (int i = 0; i < 3; i++) sum += (int64_t)m[3 * i + j] * g->light[i];
+        g->lm[j] = sat64(asr(sum, 14), -131071, 131071);
     }
-    g->nvis = 0;
-    for (unsigned k = 0; k < g->nface; k++) {
-        unsigned fi = (g->ffirst + k) & MEM_MASK;
-        const geo3d_face_t *f = &g->fmem[fi];
-        const geo3d_proj_t *p[4];
-        bool skip = false;
-        for (int i = 0; i < 4; i++) {
-            p[i] = &g->pmem[f->idx[i] & MEM_MASK];
-            if (p[i]->flags & 7) skip = true;
-        }
-        if (skip) { g->cnt_skip++; continue; }
-        int64_t area = (int64_t)(p[1]->sx - p[0]->sx) * (p[2]->sy - p[0]->sy) -
-                       (int64_t)(p[1]->sy - p[0]->sy) * (p[2]->sx - p[0]->sx);
-        if (area <= 0) { g->cnt_cull++; continue; }
-        int64_t shade = asr(lm[0] * f->n[0] + lm[1] * f->n[1] + lm[2] * f->n[2], 14);
-        int64_t lvl = shade <= 0 ? 0 : asr(shade * 7, 14);
-        if (lvl > 6) lvl = 6;
-        geo3d_vis_t *vis = &g->vis[g->nvis++];
-        vis->key = p[0]->z + p[1]->z + p[2]->z + p[3]->z;
-        vis->face = (uint16_t)fi;
-        vis->color = (uint8_t)(f->base + lvl);
-        vis->level = (uint8_t)lvl;
+}
+
+/* Face k of the model: skipped, culled or added to vis[]. */
+static void classify_face(geo3d_t *g, unsigned k) {
+    const int64_t *lm = g->lm;
+    unsigned fi = (g->ffirst + k) & MEM_MASK;
+    const geo3d_face_t *f = &g->fmem[fi];
+    const geo3d_proj_t *p[4];
+    bool skip = false;
+    for (int i = 0; i < 4; i++) {
+        p[i] = &g->pmem[f->idx[i] & MEM_MASK];
+        if (p[i]->flags & 7) skip = true;
     }
-    qsort(g->vis, g->nvis, sizeof(g->vis[0]), cmp_vis);
-    g->cnt_draw = g->nvis;
+    if (skip) { g->cnt_skip++; return; }
+    int64_t area = (int64_t)(p[1]->sx - p[0]->sx) * (p[2]->sy - p[0]->sy) -
+                   (int64_t)(p[1]->sy - p[0]->sy) * (p[2]->sx - p[0]->sx);
+    if (area <= 0) { g->cnt_cull++; return; }
+    int64_t shade = asr(lm[0] * f->n[0] + lm[1] * f->n[1] + lm[2] * f->n[2], 14);
+    int64_t lvl = shade <= 0 ? 0 : asr(shade * 7, 14);
+    if (lvl > 6) lvl = 6;
+    geo3d_vis_t *vis = &g->vis[g->nvis++];
+    vis->key = p[0]->z + p[1]->z + p[2]->z + p[3]->z;
+    vis->face = (uint16_t)fi;
+    vis->color = (uint8_t)(f->base + lvl);
+    vis->level = (uint8_t)lvl;
+}
+
+/* Heap sort of vis[] by cmp_vis, one sift-down at a time: the heap keeps
+ * the element that sorts last on top. */
+static void sift_down(geo3d_vis_t *v, unsigned i, unsigned n) {
+    for (;;) {
+        unsigned c = 2 * i + 1;
+        if (c >= n) return;
+        if (c + 1 < n && cmp_vis(&v[c + 1], &v[c]) > 0) c++;
+        if (cmp_vis(&v[c], &v[i]) <= 0) return;
+        geo3d_vis_t t = v[i]; v[i] = v[c]; v[c] = t;
+        i = c;
+    }
 }
 
 static void face_rows(geo3d_t *g, const geo3d_vis_t *vis) {
@@ -326,40 +338,83 @@ static unsigned face_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, u
 /* RUN                                                                 */
 /* ------------------------------------------------------------------ */
 
+/* RUN: busy from here; the work is done by geo3d_next_command (setup). */
 static void run(geo3d_t *g, uint8_t ctrl) {
     if (g->running) return;                 /* the RTL ignores RUN while busy */
-    for (unsigned k = 0; k < g->nvert; k++) {
-        unsigned n = (g->vfirst + k) & MEM_MASK;
-        g->pmem[n] = geo3d_transform(g->cfg, g->vmem[n]);
-        g->result = g->pmem[n];
-    }
     g->cnt_skip = g->cnt_draw = g->cnt_cull = 0;
     g->faces = (ctrl & 2) != 0;
     g->textured = (ctrl & 4) != 0;
     g->next_item = 0;
-    if (g->faces) {
-        classify_faces(g);
-        if (g->nvis) face_rows(g, &g->vis[0]);
-    } else {
-        int32_t seg[4];
-        g->nseg = 0;
-        for (unsigned k = 0; k < g->nedge; k++) {
-            switch (classify_edge(g, k, seg)) {
-            case CLIP_SKIP: g->cnt_skip++; break;
-            case CLIP_CULL: g->cnt_cull++; break;
-            default:
-                g->cnt_draw++;
-                for (int i = 0; i < 4; i++) g->seg[g->nseg][i] = (int16_t)seg[i];
-                g->nseg++;
+    g->nvis = 0;
+    g->nseg = 0;
+    g->phase = GEO3D_PH_XFORM;
+    g->step = 0;
+    g->running = true;
+}
+
+/* GEO3D_SETUP steps of the RUN's setup; true once it is done. */
+static bool setup(geo3d_t *g) {
+    for (unsigned w = 0; w < GEO3D_SETUP; w++) {
+        switch (g->phase) {
+        case GEO3D_PH_XFORM:
+            if (g->step < g->nvert) {
+                unsigned n = (g->vfirst + g->step++) & MEM_MASK;
+                g->pmem[n] = geo3d_transform(g->cfg, g->vmem[n]);
+                g->result = g->pmem[n];
                 break;
             }
+            g->phase = GEO3D_PH_CLASSIFY;
+            g->step = 0;
+            if (g->faces) light_model(g);
+            break;
+        case GEO3D_PH_CLASSIFY:
+            if (g->faces) {
+                if (g->step < g->nface) { classify_face(g, g->step++); break; }
+                g->cnt_draw = g->nvis;
+                g->phase = GEO3D_PH_HEAPIFY;
+                g->step = (uint16_t)(g->nvis / 2);
+                break;
+            }
+            if (g->step < g->nedge) {
+                int32_t seg[4];
+                switch (classify_edge(g, g->step++, seg)) {
+                case CLIP_SKIP: g->cnt_skip++; break;
+                case CLIP_CULL: g->cnt_cull++; break;
+                default:
+                    g->cnt_draw++;
+                    for (int i = 0; i < 4; i++) g->seg[g->nseg][i] = (int16_t)seg[i];
+                    g->nseg++;
+                    break;
+                }
+                break;
+            }
+            g->phase = GEO3D_PH_DRAW;
+            return true;
+        case GEO3D_PH_HEAPIFY:                  /* step: the next node to sift, + 1 */
+            if (g->step > 0) { g->step--; sift_down(g->vis, g->step, g->nvis); break; }
+            g->phase = GEO3D_PH_SORT;
+            g->step = g->nvis;                  /* the heap's size */
+            break;
+        case GEO3D_PH_SORT:
+            if (g->step > 1) {
+                g->step--;
+                geo3d_vis_t t = g->vis[0]; g->vis[0] = g->vis[g->step]; g->vis[g->step] = t;
+                sift_down(g->vis, 0, g->step);
+                break;
+            }
+            g->phase = GEO3D_PH_DRAW;
+            if (g->nvis) face_rows(g, &g->vis[0]);
+            return true;
+        default:
+            return true;
         }
     }
-    g->running = true;
+    return false;
 }
 
 unsigned geo3d_next_command(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX]) {
     if (!g->running) return 0;
+    if (g->phase != GEO3D_PH_DRAW && !setup(g)) return GEO3D_AGAIN;
     if (!g->faces) {
         if (g->next_item >= g->nseg) return 0;
         const int16_t *s = g->seg[g->next_item++];
