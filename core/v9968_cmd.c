@@ -1422,6 +1422,72 @@ V9968_HOT unsigned v9968_geo_line(v9968_t *v, const uint8_t b[11], unsigned budg
     return cost;
 }
 
+/* geo3d's one-row LRMM (a textured face's row: NY = 1, ARG = 0, IMP or
+ * TIMP) run at once, like v9968_geo_line: the registers written by
+ * write_lrmm_regs (and the command started by it), the pixels drawn, then
+ * the state of the end of the row and of the command. G4 or G7 (G7
+ * interleaved or not), a window that is not empty, the row inside the
+ * 256 pixels, within `budget`; otherwise V9968_GEO_LINE_NO and nothing
+ * changes. */
+V9968_HOT unsigned v9968_geo_lrmm(v9968_t *v, const uint8_t b[19], unsigned budget) {
+    v9968_cmd_state_t *c = &v->cmd;
+    bool v256 = !v9968_v58(v);
+    unsigned lopc = b[18] & 0x0F;
+    unsigned nx = b[8] | ((b[9] & 7u) << 8);
+    unsigned ny = b[10] | ((b[11] & (v256 ? 7u : 3u)) << 8);
+    unsigned dx = b[4] | ((b[5] & 1u) << 8);
+    if (c->state != ST_IDLE || !v256 || b[13] != 0 || (b[18] & 0xF0) != 0x30 ||
+        (lopc != 0 && lopc != 8) || ny != 1 || nx == 0 || dx + nx > 256 ||
+        c->wex < c->wsx || c->wey < c->wsy)
+        return V9968_GEO_LINE_NO;
+    v9968_mode_t mode = v9968_mode(v);
+    bool g7 = mode == V9968_MODE_G7;
+    if (mode != V9968_MODE_G4 && !g7) return V9968_GEO_LINE_NO;
+    unsigned px_cost = (v->regs[20] & 0x01) ? COST_READ_HS * 2 + COST_WRITE_HS : COST_ACCESS_SLOW * 3;
+    unsigned cost = nx * px_cost;
+    if (cost > budget) return V9968_GEO_LINE_NO;
+
+    write_lrmm_regs(v, b);                           /* registers and start() */
+    const bool il = v9968_interleave(v);
+    uint8_t *vram = v->vram;
+    const int32_t wsx = c->wsx, wsy = c->wsy;
+    const uint32_t wxr = (uint32_t)(c->wex - c->wsx), wyr = (uint32_t)(c->wey - c->wsy);
+    const uint32_t vx = (uint32_t)(int32_t)(int16_t)c->vx, vy = (uint32_t)(int32_t)(int16_t)c->vy;
+    const uint8_t color = c->color;
+    const unsigned dy = c->dy, layout = g7 ? 3u : 0u, bpp = g7 ? 8u : 4u;
+    uint32_t sx = c->sx, sy = c->sy;
+    for (unsigned i = 0; i < nx; i++) {
+        uint8_t src = lrmm_src(vram, sx, sy, layout, bpp, il, false, wsx, wxr, wsy, wyr, color);
+        unsigned d = dx + i;
+        if (g7) {
+            if (lopc == 0 || src) vram[v9968_phys(il, (dy & 0x3FFu) << 8 | d)] = src;
+        } else {
+            uint32_t a = (dy & 0x7FFu) << 7 | (d >> 1);
+            uint8_t base = vram[a];
+            uint8_t p = lop(lopc, src, (d & 1) ? (base & 0x0F) : (base >> 4));
+            vram[a] = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F)) : (uint8_t)((base & 0x0F) | (p << 4));
+        }
+        sx = (sx + vx) & 0xFFFFFu;
+        sy = (sy + vy) & 0x1FFFFFu;
+    }
+
+    /* the end of the row (lrmm_last) and of the command (finish) */
+    uint32_t svx = sext16(c->vx, 0), svy = sext16(c->vy, 0);
+    c->sx = (c->sx2 - svy) & 0xFFFFFu;
+    c->sy = (c->sy2 + svx) & 0x1FFFFFu;
+    c->sx2 = c->sx;
+    c->sy2 = c->sy;
+    c->dx = c->reg_dx;
+    c->font_addr = (c->font_addr + nx / 8u) & 0x3FFFFu;
+    c->bit_count = 7;
+    c->dy = (uint16_t)(((dy + 1u) & 0x1FFFu) & (v256 ? 0x7FFu : 0x3FFu));
+    c->nx = 1;
+    c->state = ST_IDLE;
+    c->reg_ny = c->ny;
+    V9968_SET_BITS(v->int_flags, V9968_INT_CMD_END);
+    return cost;
+}
+
 /* geo3d's short commands follow one another within the budget, until a
  * bus event waits (v9968_cmd_watch), rather than one per call. */
 V9968_HOT unsigned v9968_service(v9968_t *v, unsigned budget) {
@@ -1445,7 +1511,16 @@ V9968_HOT unsigned v9968_service(v9968_t *v, unsigned budget) {
                 }
                 write_line_regs(v, b);
             }
-            else if (n == GEO3D_CMD_MAX && geo3d_command_reg(n, 14) == 47) write_lrmm_regs(v, b);
+            else if (n == GEO3D_CMD_MAX && geo3d_command_reg(n, 14) == 47) {
+                unsigned cost = v9968_geo_lrmm(v, b, budget - used);
+                if (cost != V9968_GEO_LINE_NO) {
+                    used += cost;
+                    if (used >= budget || !g->running) return used;
+                    if (watch && *watch != watch_val) return used;
+                    continue;
+                }
+                write_lrmm_regs(v, b);
+            }
             else for (unsigned k = 0; k < n; k++) v9968_cmd_write_reg(v, geo3d_command_reg(n, k), b[k]);
         }
         used += v9968_cmd_step(v, budget - used);

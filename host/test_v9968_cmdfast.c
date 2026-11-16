@@ -78,6 +78,63 @@ static unsigned long test_geo_line(unsigned count) {
     return ran;
 }
 
+/* v9968_geo_lrmm likewise, against geo3d's LRMM (19 registers) written
+ * register by register and run by v9968_cmd_step. */
+static unsigned long test_geo_lrmm(unsigned count) {
+    static const uint8_t mode_r0[5] = { 0x06, 0x0E, 0x0E, 0x08, 0x0A };   /* G4 G7 G7 G5 G6 */
+    unsigned long ran = 0;
+    for (unsigned n = 0; n < count; n++) {
+        unsigned m = rnd() % 5;
+        va.regs[0] = vb.regs[0] = mode_r0[m];
+        va.regs[1] = vb.regs[1] = 0;
+        va.regs[20] = vb.regs[20] = (uint8_t)((rnd() & 1) | ((rnd() & 3) == 0 ? 0 : 0x08));  /* HS, SP3 */
+        va.regs[21] = vb.regs[21] = (uint8_t)((rnd() & 7) == 0);                            /* V58 */
+        for (unsigned r = 32; r <= 58; r++) if (r != 46) wr(r, (uint8_t)rnd());
+        if (rnd() & 1) { wr(51, 0); wr(52, 0); wr(53, 0); wr(54, 0); wr(55, 0xFF); wr(56, 1); wr(57, 0xFF); wr(58, 7); }
+        if ((rnd() & 7) == 0) { wr(51, (uint8_t)(rnd() & 0x7F)); wr(55, (uint8_t)(rnd() & 0x7F)); }   /* small windows */
+        uint8_t b[19];
+        for (unsigned i = 0; i < 19; i++) b[i] = (uint8_t)rnd();
+        /* geo3d's shape most of the time: NY = 1, ARG = 0, IMP or TIMP, a short row */
+        unsigned dx = (rnd() & 3) ? rnd() % 256 : rnd() % 512, nx = (rnd() & 3) ? 1 + rnd() % 40 : rnd() % 300;
+        b[4] = (uint8_t)dx; b[5] = (uint8_t)(dx >> 8); b[8] = (uint8_t)nx; b[9] = (uint8_t)(nx >> 8);
+        if (rnd() & 7) { b[10] = 1; b[11] = (rnd() & 1) ? 0 : 0xF8; }
+        if (rnd() & 7) b[13] = 0;
+        if (rnd() & 3) { b[15] = (rnd() & 1) ? 0 : 0xFF; b[17] = (rnd() & 1) ? 0 : 0xFF; b[14] &= 0x7F; b[16] &= 0x7F; }
+        static const uint8_t lops[6] = { 0, 8, 0, 8, 1, 3 };
+        b[18] = (uint8_t)(((rnd() & 15) == 0 ? (rnd() & 0xF0) : 0x30) | lops[rnd() % 6]);
+        if ((rnd() & 3) == 0) b[3] = (uint8_t)(rnd() & 0x03);
+        memcpy(vram_b, vram_a, V9968_VRAM_SIZE);
+        vb.cmd = va.cmd;
+        unsigned budget = (rnd() & 3) ? (1u << 20) : rnd() % 3000;
+        v9968_t before = vb;
+        unsigned cost = v9968_geo_lrmm(&vb, b, budget);
+        if (cost == V9968_GEO_LINE_NO) {
+            if (memcmp(&before, &vb, sizeof vb) || memcmp(vram_a, vram_b, V9968_VRAM_SIZE)) {
+                printf("FAIL geo_lrmm %u: changed the state although it did not apply\n", n);
+                exit(1);
+            }
+            continue;
+        }
+        ran++;
+        for (unsigned k = 0; k < 19; k++) v9968_cmd_write_reg(&va, geo3d_command_reg(19, k), b[k]);
+        unsigned long used = 0;
+        for (int i = 0; i < 100000 && v9968_cmd_busy(&va); i++) used += v9968_cmd_step(&va, 1u << 20);
+        if (used != cost || memcmp(&va.cmd, &vb.cmd, sizeof va.cmd) || va.int_flags != vb.int_flags ||
+            memcmp(vram_a, vram_b, V9968_VRAM_SIZE)) {
+            printf("FAIL geo_lrmm %u (mode %02x dx %u nx %u lop %x): clocks %lu / %u\n",
+                   n, va.regs[0], dx, nx, b[18] & 15, used, cost);
+            const uint8_t *pa = (const uint8_t *)&va.cmd, *pb = (const uint8_t *)&vb.cmd;
+            for (unsigned o = 0; o < sizeof(va.cmd); o++)
+                if (pa[o] != pb[o]) printf("  cmd byte %u: %02x / %02x\n", o, pa[o], pb[o]);
+            for (unsigned i = 0, k = 0; i < V9968_VRAM_SIZE && k < 4; i++)
+                if (vram_a[i] != vram_b[i]) { printf("  vram %05x: %02x / %02x\n", i, vram_a[i], vram_b[i]); k++; }
+            exit(1);
+        }
+        va.int_flags = vb.int_flags = 0;
+    }
+    return ran;
+}
+
 int main(int argc, char **argv) {
     unsigned count = argc > 1 ? (unsigned)atoi(argv[1]) : 3000;
     rng = argc > 2 ? (uint32_t)atoi(argv[2]) : 12345u;
@@ -178,6 +235,9 @@ int main(int argc, char **argv) {
     unsigned long geo = test_geo_line(count * 10);
     printf("test_v9968_cmdfast: v9968_geo_line identical (%lu of %u LINEs applied)\n", geo, count * 10);
     if (geo < count) { printf("FAIL: v9968_geo_line applied too rarely\n"); return 1; }
+    unsigned long lr = test_geo_lrmm(count * 10);
+    printf("test_v9968_cmdfast: v9968_geo_lrmm identical (%lu of %u LRMMs applied)\n", lr, count * 10);
+    if (lr < count / 2) { printf("FAIL: v9968_geo_lrmm applied too rarely\n"); return 1; }
     if (yields == 0) { printf("FAIL: v9968_cmd_watch never stopped a command\n"); return 1; }
     return 0;
 }
