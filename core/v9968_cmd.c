@@ -1145,6 +1145,16 @@ V9968_HOT static void mm_run(ctx_t *x, unsigned budget) {
 /* LINE fast path                                                      */
 /* ------------------------------------------------------------------ */
 
+/* `n` bytes of a G7 row from DX = lo (lo + n <= 256) set to `color`; with
+ * the interleave the even and the odd bytes lie in two banks. */
+static inline void fill_g7_row(uint8_t *vram, bool il, uint32_t y, uint32_t lo, uint32_t n, uint8_t color) {
+    uint32_t a = (y & 0x3FFu) << 8 | lo;
+    if (!il) { memset(vram + a, color, n); return; }
+    uint32_t hi = a + n - 1, e0 = (a + 1) & ~1u, o0 = a | 1u;
+    if (e0 <= hi) memset(vram + v9968_phys(true, e0), color, (hi - e0) / 2 + 1);
+    if (o0 <= hi) memset(vram + v9968_phys(true, o0), color, (hi - o0) / 2 + 1);
+}
+
 /* LINE's last pixel (NX = R#40), as step_one: put_pixel, the LINE parts of
  * advance() at the end of the line (SX back to R#32, LRMM's row start
  * stepped, DX/DY/NYB as for any pixel; NX stays) and finish(). */
@@ -1228,8 +1238,8 @@ void line_pixels(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool 
      * never reaches bit 11, so only DX moves; with IMP (or a T-op on a
      * colour other than 0) the run is a fill (256-pixel modes: FG4 in G6
      * wraps its 512 pixels in 128-byte rows). */
-    if (!maj && reg_ny == 0 && (lopc & 7) == 0 && !skip && !il && !wide &&
-        ((layout == 0 && bpp == 4) || (layout == 3 && bpp == 8))) {
+    if (!maj && reg_ny == 0 && (lopc & 7) == 0 && !skip && !wide &&
+        ((layout == 0 && bpp == 4 && !il) || (layout == 3 && bpp == 8))) {
         uint32_t room;
         if (diy && y == 0) room = 0;                    /* dy_ovf on every pixel */
         else if (dix) room = (!wide && d >= 256) ? 0 : d;
@@ -1238,7 +1248,7 @@ void line_pixels(ctx_t *x, unsigned budget, unsigned layout, unsigned bpp, bool 
         if (n == 0) return;
         uint32_t lo = dix ? d - (n - 1) : d, hi = lo + n - 1;
         if (layout == 3) {
-            memset(vram + ((y & 0x3FFu) << 8 | lo), src, n);
+            fill_g7_row(vram, il, y, lo, n, src);
         } else {
             uint8_t *row = vram + ((y & 0x7FFu) << 7);
             uint8_t p = src & 0x0F;
@@ -1303,6 +1313,8 @@ out:
 
 V9968_HOT static void line_g4(ctx_t *x, unsigned b) { line_pixels(x, b, 0, 4, false); }
 V9968_HOT static void line_g7(ctx_t *x, unsigned b) { line_pixels(x, b, 3, 8, false); }
+/* G7 without sprite mode 3 (SCREEN 8 as on the V9958) is interleaved */
+V9968_HOT static void line_g7i(ctx_t *x, unsigned b) { line_pixels(x, b, 3, 8, true); }
 /* the other modes, and G7 interleaved (without sprite mode 3): the demos
  * draw lines in G4 and in G7 with SP3 */
 V9968_HOT static void __attribute__((noinline)) line_any(ctx_t *x, unsigned b) {
@@ -1312,7 +1324,7 @@ V9968_HOT static void __attribute__((noinline)) line_any(ctx_t *x, unsigned b) {
 
 V9968_HOT static void line_run(ctx_t *x, unsigned budget) {
     if (x->g4 && x->bpp == 4 && !x->interleave) line_g4(x, budget);
-    else if (!x->g4 && !x->g5 && !x->g6 && x->bpp == 8 && !x->interleave) line_g7(x, budget);
+    else if (!x->g4 && !x->g5 && !x->g6 && x->bpp == 8) (x->interleave ? line_g7i : line_g7)(x, budget);
     else line_any(x, budget);
 }
 
@@ -1338,8 +1350,8 @@ V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget) {
  * the command started, every pixel drawn and the command ended, leaving
  * the state (registers, counters, LRMM's row start, NYB, CE end flag) and
  * the clocks exactly as write_line_regs() and v9968_cmd_step() would.
- * Only NY = 0, ARG = 0 (X major, right/down), IMP or a T-op, in G4 or G7
- * not interleaved, ending at DX <= 255, within `budget`; otherwise it
+ * Only NY = 0, ARG = 0 (X major, right/down), IMP or a T-op, in G4 or G7,
+ * ending at DX <= 255, within `budget`; otherwise it
  * returns V9968_GEO_LINE_NO and changes nothing. */
 V9968_HOT unsigned v9968_geo_line(v9968_t *v, const uint8_t b[11], unsigned budget) {
     v9968_cmd_state_t *c = &v->cmd;
@@ -1353,7 +1365,7 @@ V9968_HOT unsigned v9968_geo_line(v9968_t *v, const uint8_t b[11], unsigned budg
         return V9968_GEO_LINE_NO;
     v9968_mode_t mode = v9968_mode(v);
     bool g7 = mode == V9968_MODE_G7;
-    if ((mode != V9968_MODE_G4 && !g7) || v9968_interleave(v)) return V9968_GEO_LINE_NO;
+    if (mode != V9968_MODE_G4 && !g7) return V9968_GEO_LINE_NO;     /* G7 may be interleaved */
     unsigned px_cost = (v->regs[20] & 0x01) ? COST_READ_HS + COST_WRITE_HS : COST_ACCESS_SLOW * 2;
     unsigned cost = (nx + 1) * px_cost;
     if (cost > budget) return V9968_GEO_LINE_NO;
@@ -1362,7 +1374,7 @@ V9968_HOT unsigned v9968_geo_line(v9968_t *v, const uint8_t b[11], unsigned budg
     uint8_t color = b[8];
     if (!((lopc & 8) && color == 0)) {               /* T-ops keep VRAM for colour 0 */
         if (g7) {
-            memset(v->vram + ((dy & 0x3FFu) << 8 | dx), color, nx + 1);
+            fill_g7_row(v->vram, v9968_interleave(v), dy, dx, nx + 1, color);
         } else {
             uint8_t *row = v->vram + ((dy & 0x7FFu) << 7);
             uint8_t p = color & 0x0F;
