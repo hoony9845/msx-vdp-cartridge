@@ -1422,6 +1422,42 @@ V9968_HOT unsigned v9968_geo_line(v9968_t *v, const uint8_t b[11], unsigned budg
     return cost;
 }
 
+/* The pixels of geo3d's one-row LRMM with the mode as constants, a copy
+ * each for G4, G7 and interleaved G7 (below). */
+static inline __attribute__((always_inline))
+void geo_lrmm_pixels(uint8_t *vram, unsigned layout, unsigned bpp, bool il, bool timp, uint32_t sx, uint32_t sy,
+                     uint32_t vx, uint32_t vy, int32_t wsx, uint32_t wxr, int32_t wsy, uint32_t wyr,
+                     uint8_t color, unsigned dx, unsigned dy, unsigned nx) {
+    for (unsigned i = 0; i < nx; i++) {
+        uint8_t src = lrmm_src(vram, sx, sy, layout, bpp, il, false, wsx, wxr, wsy, wyr, color);
+        unsigned d = dx + i;
+        if (bpp == 8) {
+            if (!timp || src) vram[v9968_phys(il, (dy & 0x3FFu) << 8 | d)] = src;
+        } else {
+            uint32_t a = (dy & 0x7FFu) << 7 | (d >> 1);
+            uint8_t base = vram[a];
+            uint8_t p = lop(timp ? 8u : 0u, src, (d & 1) ? (base & 0x0F) : (base >> 4));
+            vram[a] = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F)) : (uint8_t)((base & 0x0F) | (p << 4));
+        }
+        sx = (sx + vx) & 0xFFFFFu;
+        sy = (sy + vy) & 0x1FFFFFu;
+    }
+}
+
+#define GEO_LRMM_ARGS vram, timp, sx, sy, vx, vy, wsx, wxr, wsy, wyr, color, dx, dy, nx
+#define GEO_LRMM_PARAMS uint8_t *vram, bool timp, uint32_t sx, uint32_t sy, uint32_t vx, uint32_t vy, \
+                        int32_t wsx, uint32_t wxr, int32_t wsy, uint32_t wyr, uint8_t color, \
+                        unsigned dx, unsigned dy, unsigned nx
+V9968_HOT static void geo_lrmm_g4(GEO_LRMM_PARAMS) {
+    geo_lrmm_pixels(vram, 0, 4, false, timp, sx, sy, vx, vy, wsx, wxr, wsy, wyr, color, dx, dy, nx);
+}
+V9968_HOT static void geo_lrmm_g7(GEO_LRMM_PARAMS) {
+    geo_lrmm_pixels(vram, 3, 8, false, timp, sx, sy, vx, vy, wsx, wxr, wsy, wyr, color, dx, dy, nx);
+}
+V9968_HOT static void geo_lrmm_g7i(GEO_LRMM_PARAMS) {
+    geo_lrmm_pixels(vram, 3, 8, true, timp, sx, sy, vx, vy, wsx, wxr, wsy, wyr, color, dx, dy, nx);
+}
+
 /* geo3d's one-row LRMM (a textured face's row: NY = 1, ARG = 0, IMP or
  * TIMP) run at once, like v9968_geo_line: the registers written by
  * write_lrmm_regs (and the command started by it), the pixels drawn, then
@@ -1454,22 +1490,12 @@ V9968_HOT unsigned v9968_geo_lrmm(v9968_t *v, const uint8_t b[19], unsigned budg
     const uint32_t wxr = (uint32_t)(c->wex - c->wsx), wyr = (uint32_t)(c->wey - c->wsy);
     const uint32_t vx = (uint32_t)(int32_t)(int16_t)c->vx, vy = (uint32_t)(int32_t)(int16_t)c->vy;
     const uint8_t color = c->color;
-    const unsigned dy = c->dy, layout = g7 ? 3u : 0u, bpp = g7 ? 8u : 4u;
-    uint32_t sx = c->sx, sy = c->sy;
-    for (unsigned i = 0; i < nx; i++) {
-        uint8_t src = lrmm_src(vram, sx, sy, layout, bpp, il, false, wsx, wxr, wsy, wyr, color);
-        unsigned d = dx + i;
-        if (g7) {
-            if (lopc == 0 || src) vram[v9968_phys(il, (dy & 0x3FFu) << 8 | d)] = src;
-        } else {
-            uint32_t a = (dy & 0x7FFu) << 7 | (d >> 1);
-            uint8_t base = vram[a];
-            uint8_t p = lop(lopc, src, (d & 1) ? (base & 0x0F) : (base >> 4));
-            vram[a] = (d & 1) ? (uint8_t)((base & 0xF0) | (p & 0x0F)) : (uint8_t)((base & 0x0F) | (p << 4));
-        }
-        sx = (sx + vx) & 0xFFFFFu;
-        sy = (sy + vy) & 0x1FFFFFu;
-    }
+    const unsigned dy = c->dy;
+    const bool timp = lopc == 8;
+    const uint32_t sx = c->sx, sy = c->sy;
+    if (!g7)    geo_lrmm_g4(GEO_LRMM_ARGS);
+    else if (il) geo_lrmm_g7i(GEO_LRMM_ARGS);
+    else        geo_lrmm_g7(GEO_LRMM_ARGS);
 
     /* the end of the row (lrmm_last) and of the command (finish) */
     uint32_t svx = sext16(c->vx, 0), svy = sext16(c->vy, 0);
