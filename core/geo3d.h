@@ -107,6 +107,24 @@ void geo3d_read_data(geo3d_t *g);                       /* advance rptr */
 #define GEO3D_SETUP 16u
 enum { GEO3D_PH_XFORM, GEO3D_PH_CLASSIFY, GEO3D_PH_HEAPIFY, GEO3D_PH_SORT, GEO3D_PH_DRAW };
 unsigned geo3d_next_command(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX]);
+
+/* A textured face's row as numbers: the LRMM geo3d_next_command would
+ * write as 19 register bytes (NY = 1, ARG = 0), each field masked to its
+ * register bits. geo3d_next_command_ex returns GEO3D_LRMM_ROW with `row`
+ * filled instead of the bytes for such a row (`row` may be NULL: then it
+ * is geo3d_next_command). */
+typedef struct {
+    uint16_t sx;            /* R#32-33, 12 bits */
+    uint16_t sy;            /* R#34-35, 13 bits */
+    uint16_t dx;            /* R#36-37, 9 bits */
+    uint16_t dy;            /* R#38-39, 11 bits */
+    uint16_t nx;            /* R#40-41, 11 bits */
+    uint16_t vx, vy;        /* R#47-50 */
+    uint8_t  color;         /* R#44 */
+    uint8_t  cmd;           /* R#46: LRMM | logical operation */
+} geo3d_lrmm_t;
+#define GEO3D_LRMM_ROW 0x100u
+unsigned geo3d_next_command_ex(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX], geo3d_lrmm_t *row);
 static inline unsigned geo3d_command_reg(unsigned len, unsigned k) {
     if (len != GEO3D_CMD_MAX) return 36 + k;
     return k < 14 ? 32 + k : k < 18 ? 33 + k : 46;

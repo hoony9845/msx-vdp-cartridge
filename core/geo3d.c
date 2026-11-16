@@ -273,7 +273,7 @@ static unsigned flat_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, u
 /* A row of a textured face: the edge crossings are candidates in edge
  * order (the first of equal x wins on each side), with their u, v; 32
  * bits where the values fit (x, u, v), 64 for the products. */
-static unsigned tex_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, uint8_t *b) {
+static bool tex_row(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, geo3d_lrmm_t *r) {
     const int32_t *xs = g->fx, *ys = g->fy, *us = g->fu, *vs = g->fv;
     /* The candidates' x first, remembering which they are (edge k * 4 +
      * 0 its crossing, 1 its first corner, 2 its second): an empty row
@@ -300,10 +300,10 @@ static unsigned tex_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, ui
         }
     }
 #undef PICK
-    if (!set) return 0;
+    if (!set) return false;
     int32_t w = g->cfg[16];
     int32_t cl = lx > 0 ? lx : 0, cr = rx < w - 1 ? rx : w - 1;
-    if (cl > cr) return 0;
+    if (cl > cr) return false;
     int32_t lu, lv, ru, rv;
     for (int side = 0; side < 2; side++) {
         unsigned id = side ? ri : li;
@@ -329,23 +329,42 @@ static unsigned tex_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, ui
     unsigned sx = (unsigned)((g->texx + asr(su, 8)) & 0xFFF);
     unsigned sy = (unsigned)((g->texy + vis->level * g->tstride + asr(sv, 8)) & 0x1FFF);
     int32_t nxp = cr - cl + 1;
-    b[0] = (uint8_t)sx;        b[1] = (uint8_t)(sx >> 8);
-    b[2] = (uint8_t)sy;        b[3] = (uint8_t)(sy >> 8);
-    b[4] = (uint8_t)cl;        b[5] = (uint8_t)((cl >> 8) & 1);
-    b[6] = (uint8_t)dy;        b[7] = (uint8_t)(dy >> 8);
-    b[8] = (uint8_t)nxp;       b[9] = (uint8_t)((nxp >> 8) & 7);
+    r->sx = (uint16_t)sx;                       /* 12 bits already */
+    r->sy = (uint16_t)sy;                       /* 13 bits already */
+    r->dx = (uint16_t)(cl & 0x1FF);
+    r->dy = (uint16_t)dy;                       /* 11 bits already */
+    r->nx = (uint16_t)(nxp & 0x7FF);
+    r->vx = (uint16_t)du;
+    r->vy = (uint16_t)dv;
+    r->color = vis->color;
+    r->cmd = (uint8_t)(0x30 | (g->lop & 0xF));
+    return true;
+}
+
+static unsigned tex_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, uint8_t *b) {
+    geo3d_lrmm_t r;
+    if (!tex_row(g, vis, y, &r)) return 0;
+    b[0] = (uint8_t)r.sx;      b[1] = (uint8_t)(r.sx >> 8);
+    b[2] = (uint8_t)r.sy;      b[3] = (uint8_t)(r.sy >> 8);
+    b[4] = (uint8_t)r.dx;      b[5] = (uint8_t)(r.dx >> 8);
+    b[6] = (uint8_t)r.dy;      b[7] = (uint8_t)(r.dy >> 8);
+    b[8] = (uint8_t)r.nx;      b[9] = (uint8_t)(r.nx >> 8);
     b[10] = 1;                 b[11] = 0;
-    b[12] = vis->color;        b[13] = 0;
-    b[14] = (uint8_t)du;       b[15] = (uint8_t)(du >> 8);
-    b[16] = (uint8_t)dv;       b[17] = (uint8_t)(dv >> 8);
-    b[18] = (uint8_t)(0x30 | (g->lop & 0xF));
+    b[12] = r.color;           b[13] = 0;
+    b[14] = (uint8_t)r.vx;     b[15] = (uint8_t)(r.vx >> 8);
+    b[16] = (uint8_t)r.vy;     b[17] = (uint8_t)(r.vy >> 8);
+    b[18] = r.cmd;
     return 19;
 }
 
 /* The span of one row of the current face (face_rows() took its corners);
- * returns the command length or 0. */
-static unsigned face_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, uint8_t *b) {
-    return g->ftex ? tex_span(g, vis, y, b) : flat_span(g, vis, y, b);
+ * returns the command length or 0 (GEO3D_LRMM_ROW with `row` filled for a
+ * textured row when `row` is given). */
+static unsigned face_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, uint8_t *b,
+                          geo3d_lrmm_t *row) {
+    if (!g->ftex) return flat_span(g, vis, y, b);
+    if (row) return tex_row(g, vis, y, row) ? GEO3D_LRMM_ROW : 0;
+    return tex_span(g, vis, y, b);
 }
 
 /* ------------------------------------------------------------------ */
@@ -427,6 +446,10 @@ static bool setup(geo3d_t *g) {
 }
 
 unsigned geo3d_next_command(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX]) {
+    return geo3d_next_command_ex(g, bytes, NULL);
+}
+
+unsigned geo3d_next_command_ex(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX], geo3d_lrmm_t *row) {
     if (!g->running) return 0;
     if (g->phase != GEO3D_PH_DRAW && !setup(g)) return GEO3D_AGAIN;
     if (!g->faces) {
@@ -439,7 +462,7 @@ unsigned geo3d_next_command(geo3d_t *g, uint8_t bytes[GEO3D_CMD_MAX]) {
     while (g->next_item < g->nvis) {
         const geo3d_vis_t *vis = &g->vis[g->next_item];
         while (g->row <= g->row_end) {
-            unsigned n = face_span(g, vis, g->row++, bytes);
+            unsigned n = face_span(g, vis, g->row++, bytes, row);
             if (n) return n;
             if (++work >= GEO3D_WORK) return GEO3D_AGAIN;
         }

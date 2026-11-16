@@ -1466,14 +1466,52 @@ V9968_HOT static void geo_lrmm_g7i(GEO_LRMM_PARAMS) {
  * 256 pixels, within `budget`; otherwise V9968_GEO_LINE_NO and nothing
  * changes. */
 V9968_HOT unsigned v9968_geo_lrmm(v9968_t *v, const uint8_t b[19], unsigned budget) {
+    bool v256 = !v9968_v58(v);
+    /* what the row form cannot carry: NY != 1, ARG != 0, not an LRMM */
+    unsigned ny = b[10] | ((b[11] & (v256 ? 7u : 3u)) << 8);
+    if (!v256 || b[13] != 0 || (b[18] & 0xF0) != 0x30 || ny != 1) return V9968_GEO_LINE_NO;
+    geo3d_lrmm_t r;
+    r.sx = (uint16_t)(b[0] | ((b[1] & 0x0F) << 8));
+    r.sy = (uint16_t)(b[2] | ((b[3] & 0x1F) << 8));
+    r.dx = (uint16_t)(b[4] | ((b[5] & 1) << 8));
+    r.dy = (uint16_t)(b[6] | ((b[7] & 7) << 8));
+    r.nx = (uint16_t)(b[8] | ((b[9] & 7) << 8));
+    r.vx = (uint16_t)(b[14] | (b[15] << 8));
+    r.vy = (uint16_t)(b[16] | (b[17] << 8));
+    r.color = b[12];
+    r.cmd = b[18];
+    unsigned cost = v9968_geo_lrmm_row(v, &r, budget);
+    /* font_addr takes all of R#33 (the row form keeps SX's 4 bits) */
+    if (cost != V9968_GEO_LINE_NO)
+        v->cmd.font_addr = ((b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)(b[2] & 3) << 16)) +
+                            r.nx / 8u) & 0x3FFFFu;
+    return cost;
+}
+
+/* the row form back to geo3d's 19 register bytes (as its tex_span) */
+static void lrmm_row_bytes(const geo3d_lrmm_t *r, uint8_t b[19]) {
+    b[0] = (uint8_t)r->sx;     b[1] = (uint8_t)(r->sx >> 8);
+    b[2] = (uint8_t)r->sy;     b[3] = (uint8_t)(r->sy >> 8);
+    b[4] = (uint8_t)r->dx;     b[5] = (uint8_t)(r->dx >> 8);
+    b[6] = (uint8_t)r->dy;     b[7] = (uint8_t)(r->dy >> 8);
+    b[8] = (uint8_t)r->nx;     b[9] = (uint8_t)(r->nx >> 8);
+    b[10] = 1;                 b[11] = 0;
+    b[12] = r->color;          b[13] = 0;
+    b[14] = (uint8_t)r->vx;    b[15] = (uint8_t)(r->vx >> 8);
+    b[16] = (uint8_t)r->vy;    b[17] = (uint8_t)(r->vy >> 8);
+    b[18] = r->cmd;
+}
+
+/* geo3d's textured row straight from its numbers: the registers and the
+ * start() of an LRMM with NY = 1 and ARG = 0 in G4 or G7 (V9968 mode),
+ * then the pixels and the end, as the general code leaves them. */
+V9968_HOT unsigned v9968_geo_lrmm_row(v9968_t *v, const geo3d_lrmm_t *r, unsigned budget) {
     v9968_cmd_state_t *c = &v->cmd;
     bool v256 = !v9968_v58(v);
-    unsigned lopc = b[18] & 0x0F;
-    unsigned nx = b[8] | ((b[9] & 7u) << 8);
-    unsigned ny = b[10] | ((b[11] & (v256 ? 7u : 3u)) << 8);
-    unsigned dx = b[4] | ((b[5] & 1u) << 8);
-    if (c->state != ST_IDLE || !v256 || b[13] != 0 || (b[18] & 0xF0) != 0x30 ||
-        (lopc != 0 && lopc != 8) || ny != 1 || nx == 0 || dx + nx > 256 ||
+    unsigned lopc = r->cmd & 0x0F;
+    unsigned nx = r->nx, dx = r->dx;
+    if (c->state != ST_IDLE || !v256 || (r->cmd & 0xF0) != 0x30 ||
+        (lopc != 0 && lopc != 8) || nx == 0 || dx + nx > 256 ||
         c->wex < c->wsx || c->wey < c->wsy)
         return V9968_GEO_LINE_NO;
     v9968_mode_t mode = v9968_mode(v);
@@ -1483,7 +1521,36 @@ V9968_HOT unsigned v9968_geo_lrmm(v9968_t *v, const uint8_t b[19], unsigned budg
     unsigned cost = nx * px_cost;
     if (cost > budget) return V9968_GEO_LINE_NO;
 
-    write_lrmm_regs(v, b);                           /* registers and start() */
+    /* write_lrmm_regs, then start(0x3X) with op LRMM, ARG 0 (no FG4, no
+     * XHR), G4/G7 (pixel step 1, not wide), V9968 mode */
+    const uint32_t sy0 = (uint32_t)r->sy << 8;
+    c->reg_sx = r->sx;
+    c->font_addr = r->sx | ((uint32_t)(r->sy & 3u) << 16);
+    c->reg_dx = (uint16_t)dx;
+    c->reg_nx = (uint16_t)nx;
+    c->reg_ny = 1;
+    c->color = r->color;
+    c->transfer_ready = false;
+    c->arg = 0;
+    c->vx = r->vx;
+    c->vy = r->vy;
+    c->op = OP_LRMM;
+    c->lop = (uint8_t)lopc;
+    c->pixel_step = 1;
+    c->wide = false;
+    c->sx = (uint32_t)r->sx << 8;
+    c->sy = sy0;
+    c->sx2 = c->sx;
+    c->sy2 = sy0;
+    c->dx = (uint16_t)dx;
+    c->dy = r->dy;
+    c->bit_count = 7;
+    c->nx = 1;
+    c->ny = 1;
+    c->nyb = (uint16_t)(((nx - 1u) & 0x7FF) >> 1);
+    c->source = c->color;
+    c->read_color = false;
+    c->state = ST_LRMM;
     const bool il = v9968_interleave(v);
     uint8_t *vram = v->vram;
     const int32_t wsx = c->wsx, wsy = c->wsy;
@@ -1524,10 +1591,23 @@ V9968_HOT unsigned v9968_service(v9968_t *v, unsigned budget) {
     for (;;) {
         if (g->running && v->cmd.state == ST_IDLE) {
             uint8_t b[GEO3D_CMD_MAX];
-            unsigned n = geo3d_next_command(g, b);
+            geo3d_lrmm_t row;
+            unsigned n = geo3d_next_command_ex(g, b, &row);
             if (n == GEO3D_AGAIN) return used;      /* back to the bus, then on */
-            if (n == 0) g->running = false;
-            if (n == 11 && geo3d_command_reg(n, 0) == 36) {
+            if (n == GEO3D_LRMM_ROW) {               /* a textured row, no register bytes */
+                unsigned cost = v9968_geo_lrmm_row(v, &row, budget - used);
+                if (cost != V9968_GEO_LINE_NO) {
+                    used += cost;
+                    if (used >= budget) return used;
+                    if (watch && *watch != watch_val) return used;
+                    continue;
+                }
+                lrmm_row_bytes(&row, b);             /* the general code then */
+                write_lrmm_regs(v, b);
+            }
+            else if (n == 0) g->running = false;
+            if (n == GEO3D_LRMM_ROW) { /* started above */ }
+            else if (n == 11 && geo3d_command_reg(n, 0) == 36) {
                 unsigned cost = v9968_geo_line(v, b, budget - used);
                 if (cost != V9968_GEO_LINE_NO) {
                     used += cost;

@@ -156,7 +156,8 @@ static void random_face(void) {
     g.vis[0].level = (uint8_t)(rnd() & 7);
 }
 
-static int test_spans(unsigned faces, unsigned long *rows, unsigned long *drawn, unsigned long *skipped) {
+static int test_spans(unsigned faces, unsigned long *rows, unsigned long *drawn, unsigned long *skipped,
+                      unsigned long *rowform) {
     for (unsigned n = 0; n < faces; n++) {
         random_face();
         face_rows(&g, &g.vis[0]);
@@ -175,12 +176,37 @@ static int test_spans(unsigned faces, unsigned long *rows, unsigned long *drawn,
             memset(a, 0xAA, sizeof a);
             memset(b, 0xAA, sizeof b);
             unsigned la = ref_face_span(&g, &g.vis[0], y, a);
-            unsigned lb = face_span(&g, &g.vis[0], y, b);
+            unsigned lb = face_span(&g, &g.vis[0], y, b, NULL);
             (*rows)++;
             if (la) (*drawn)++;
             if (la != lb || memcmp(a, b, sizeof a) || (skip && la)) {
                 printf("FAIL span: face %u row %d: %u / %u%s\n", n, y, la, lb, skip && la ? " (skipped)" : "");
                 return 1;
+            }
+            /* the row form (geo3d_next_command_ex) packs to the same bytes */
+            geo3d_lrmm_t r;
+            unsigned lr = face_span(&g, &g.vis[0], y, b, &r);
+            if (g.ftex ? (lr != (la ? GEO3D_LRMM_ROW : 0u)) : (lr != la)) {
+                printf("FAIL row form: face %u row %d: %u / %u\n", n, y, la, lr);
+                return 1;
+            }
+            if (g.ftex && la) {
+                uint8_t c[GEO3D_CMD_MAX];
+                c[0] = (uint8_t)r.sx;  c[1] = (uint8_t)(r.sx >> 8);
+                c[2] = (uint8_t)r.sy;  c[3] = (uint8_t)(r.sy >> 8);
+                c[4] = (uint8_t)r.dx;  c[5] = (uint8_t)(r.dx >> 8);
+                c[6] = (uint8_t)r.dy;  c[7] = (uint8_t)(r.dy >> 8);
+                c[8] = (uint8_t)r.nx;  c[9] = (uint8_t)(r.nx >> 8);
+                c[10] = 1;             c[11] = 0;
+                c[12] = r.color;       c[13] = 0;
+                c[14] = (uint8_t)r.vx; c[15] = (uint8_t)(r.vx >> 8);
+                c[16] = (uint8_t)r.vy; c[17] = (uint8_t)(r.vy >> 8);
+                c[18] = r.cmd;
+                if (memcmp(a, c, GEO3D_CMD_MAX)) {
+                    printf("FAIL row form bytes: face %u row %d\n", n, y);
+                    return 1;
+                }
+                (*rowform)++;
             }
             if ((rnd() & 63) == 0) y += (int32_t)(rnd() & 7);       /* jump */
         }
@@ -215,10 +241,12 @@ static int test_sort(void) {
 int main(int argc, char **argv) {
     unsigned faces = argc > 1 ? (unsigned)atoi(argv[1]) : 100000;
     rs = argc > 2 ? (uint32_t)atoi(argv[2]) : 1;
-    unsigned long rows = 0, drawn = 0, skipped = 0;
-    if (test_floor_div() || test_spans(faces, &rows, &drawn, &skipped) || test_sort()) return 1;
-    printf("test_geo3d_internal: floor_div, %lu face rows (%lu drawn, %lu faces skipped off the "
-           "screen) and the painter's sort identical to the references\n", rows, drawn, skipped);
+    unsigned long rows = 0, drawn = 0, skipped = 0, rowform = 0;
+    if (test_floor_div() || test_spans(faces, &rows, &drawn, &skipped, &rowform) || test_sort()) return 1;
+    printf("test_geo3d_internal: floor_div, %lu face rows (%lu drawn, %lu textured in row form, %lu faces "
+           "skipped off the screen) and the painter's sort identical to the references\n",
+           rows, drawn, rowform, skipped);
     if (skipped == 0) { printf("FAIL: no face was skipped\n"); return 1; }
+    if (rowform == 0) { printf("FAIL: no textured row\n"); return 1; }
     return 0;
 }

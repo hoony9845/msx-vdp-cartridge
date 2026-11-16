@@ -201,6 +201,7 @@ void v9968_cmd_write_reg(v9968_t *v, unsigned reg, uint8_t data);
 #define V9968_GEO_LINE_NO (~0u)
 V9968_HOT unsigned v9968_geo_line(v9968_t *v, const uint8_t b[11], unsigned budget);
 V9968_HOT unsigned v9968_geo_lrmm(v9968_t *v, const uint8_t b[19], unsigned budget);   /* a one-row LRMM */
+V9968_HOT unsigned v9968_geo_lrmm_row(v9968_t *v, const geo3d_lrmm_t *r, unsigned budget);  /* the same from numbers */
 /* Runs the command engine for up to `budget` clocks of the 85.9MHz engine
  * clock; returns the clocks used (0 when idle or waiting for the CPU). */
 V9968_HOT unsigned v9968_cmd_step(v9968_t *v, unsigned budget);
