@@ -12,6 +12,17 @@ static inline int64_t sat64(int64_t v, int64_t lo, int64_t hi) {
     return v < lo ? lo : v > hi ? hi : v;
 }
 
+static inline int32_t sat32(int32_t v, int32_t lo, int32_t hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+/* Python's a // b in 32 bits (b != 0, a != INT32_MIN) */
+static inline int32_t fdiv32(int32_t a, int32_t b) {
+    int32_t q = a / b;
+    if ((a - q * b != 0) && ((a < 0) != (b < 0))) q--;
+    return q;
+}
+
 /* Python's a // b (b != 0); in 32 bits when both fit (the M33 divides
  * those in hardware, 64-bit division is a library call) */
 static inline int64_t floor_div(int64_t a, int64_t b) {
@@ -224,6 +235,9 @@ static void face_rows(geo3d_t *g, const geo3d_vis_t *vis) {
         if (x < xmin) xmin = x;
         if (x > xmax) xmax = x;
     }
+    /* Corners within [-16384, 16383]: every product of a span fits 32
+     * bits (dy * dx < 2^30, dy * du * 256 < 32767 * 65280 < 2^31). */
+    g->fsmall = xmin >= -16384 && xmax <= 16383 && ymin >= -16384 && ymax <= 16383;
     g->row = ymin < 0 ? 0 : ymin;
     g->row_end = ymax < g->cfg[17] - 1 ? ymax : g->cfg[17] - 1;
     /* Wholly left or right of the screen, every row's span is empty (the
@@ -249,7 +263,8 @@ static unsigned flat_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, u
             int32_t lo = ya < yc ? ya : yc, hi = ya < yc ? yc : ya;
             if (y < lo || y > hi) continue;
             int32_t dy = y - ya, den = yc - ya;
-            x0 = x1 = xs[a] + (int32_t)floor_div((int64_t)dy * (xs[c] - xs[a]), den);
+            x0 = x1 = xs[a] + (g->fsmall ? fdiv32(dy * (xs[c] - xs[a]), den)
+                                         : (int32_t)floor_div((int64_t)dy * (xs[c] - xs[a]), den));
         }
         if (!set || x0 < xl) xl = x0;
         if (!set || x1 > xr) xr = x1;
@@ -273,7 +288,10 @@ static unsigned flat_span(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, u
 /* A row of a textured face: the edge crossings are candidates in edge
  * order (the first of equal x wins on each side), with their u, v; 32
  * bits where the values fit (x, u, v), 64 for the products. */
+static bool tex_row32(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, geo3d_lrmm_t *r);
+
 static bool tex_row(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, geo3d_lrmm_t *r) {
+    if (g->fsmall) return tex_row32(g, vis, y, r);
     const int32_t *xs = g->fx, *ys = g->fy, *us = g->fu, *vs = g->fv;
     /* The candidates' x first, remembering which they are (edge k * 4 +
      * 0 its crossing, 1 its first corner, 2 its second): an empty row
@@ -333,6 +351,72 @@ static bool tex_row(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, geo3d_l
     r->sy = (uint16_t)sy;                       /* 13 bits already */
     r->dx = (uint16_t)(cl & 0x1FF);
     r->dy = (uint16_t)dy;                       /* 11 bits already */
+    r->nx = (uint16_t)(nxp & 0x7FF);
+    r->vx = (uint16_t)du;
+    r->vy = (uint16_t)dv;
+    r->color = vis->color;
+    r->cmd = (uint8_t)(0x30 | (g->lop & 0xF));
+    return true;
+}
+
+/* tex_row for a face with fsmall: the same steps in 32 bits (see
+ * face_rows for the bounds); asr is >> (arithmetic in GCC). */
+static bool tex_row32(const geo3d_t *g, const geo3d_vis_t *vis, int32_t y, geo3d_lrmm_t *r) {
+    const int32_t *xs = g->fx, *ys = g->fy, *us = g->fu, *vs = g->fv;
+    int32_t lx = 0, rx = 0;
+    unsigned li = 0, ri = 0;
+    bool set = false;
+#define PICK(X, ID) do { int32_t x_ = (X); \
+        if (!set || x_ < lx) { lx = x_; li = (ID); } \
+        if (!set || x_ > rx) { rx = x_; ri = (ID); } \
+        set = true; } while (0)
+    for (int k = 0; k < 4; k++) {
+        int a = k, c = (k + 1) & 3;
+        int32_t ya = ys[a], yc = ys[c];
+        if (ya == yc) {
+            if (y != ya) continue;
+            PICK(xs[a], 4u * k + 1);
+            PICK(xs[c], 4u * k + 2);
+        } else {
+            int32_t lo = ya < yc ? ya : yc, hi = ya < yc ? yc : ya;
+            if (y < lo || y > hi) continue;
+            PICK(xs[a] + fdiv32((y - ya) * (xs[c] - xs[a]), yc - ya), 4u * k);
+        }
+    }
+#undef PICK
+    if (!set) return false;
+    int32_t w = g->cfg[16];
+    int32_t cl = lx > 0 ? lx : 0, cr = rx < w - 1 ? rx : w - 1;
+    if (cl > cr) return false;
+    int32_t lu, lv, ru, rv;
+    for (int side = 0; side < 2; side++) {
+        unsigned id = side ? ri : li;
+        int a = (int)(id >> 2), c = (a + 1) & 3, u, v;
+        if ((id & 3) == 1)      { u = us[a] * 256; v = vs[a] * 256; }
+        else if ((id & 3) == 2) { u = us[c] * 256; v = vs[c] * 256; }
+        else {
+            int32_t dy = y - ys[a], den = ys[c] - ys[a];
+            u = us[a] * 256 + fdiv32(dy * ((us[c] - us[a]) * 256), den);
+            v = vs[a] * 256 + fdiv32(dy * ((vs[c] - vs[a]) * 256), den);
+        }
+        if (side) { ru = u; rv = v; } else { lu = u; lv = v; }
+    }
+    unsigned dy = (unsigned)((y + g->ypage) & 0x7FF);
+    int32_t du = 0, dv = 0;
+    if (rx != lx) {
+        int32_t d = rx - lx;                    /* < 2^15: no saturation */
+        du = sat32(fdiv32(sat32(ru - lu, -131071, 131071), d), -32767, 32767);
+        dv = sat32(fdiv32(sat32(rv - lv, -131071, 131071), d), -32767, 32767);
+    }
+    int32_t off = cl - lx;                      /* < 2^15 */
+    int32_t su = lu + off * du, sv = lv + off * dv;
+    unsigned sx = (unsigned)(g->texx + (su >> 8)) & 0xFFF;
+    unsigned sy = (unsigned)(g->texy + vis->level * g->tstride + (sv >> 8)) & 0x1FFF;
+    int32_t nxp = cr - cl + 1;
+    r->sx = (uint16_t)sx;
+    r->sy = (uint16_t)sy;
+    r->dx = (uint16_t)(cl & 0x1FF);
+    r->dy = (uint16_t)dy;
     r->nx = (uint16_t)(nxp & 0x7FF);
     r->vx = (uint16_t)du;
     r->vy = (uint16_t)dv;

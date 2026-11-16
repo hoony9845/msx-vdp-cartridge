@@ -136,13 +136,19 @@ static void random_face(void) {
     g.cfg[17] = (rnd() & 3) ? 212 : 1 + rnd() % 500;
     g.texx = (uint16_t)(rnd() & 0xFFF); g.texy = (uint16_t)(rnd() & 0x1FFF);
     g.tstride = (uint8_t)rnd(); g.ypage = (uint16_t)(rnd() & 0x7FF); g.lop = (uint8_t)(rnd() & 15);
-    bool big = (rnd() & 7) == 0;
+    unsigned kind = rnd() & 15;             /* 0-1 full int16, 2-3 near the 32-bit path's bounds */
+    bool big = kind < 2, edge = kind == 2 || kind == 3;
     unsigned fi = rnd() & MEM_MASK;
     for (int k = 0; k < 4; k++) {
         unsigned vi = (fi * 4 + (unsigned)k) & MEM_MASK;
         g.fmem[fi].idx[k] = (uint16_t)vi;
         int32_t x = big ? (int16_t)rnd() : (int32_t)(rnd() % 500) - 120;
         int32_t y = big ? (int16_t)rnd() : (int32_t)(rnd() % 500) - 150;
+        if (edge) {
+            static const int32_t lim[6] = { -16385, -16384, -16383, 16382, 16383, 16384 };
+            if (rnd() & 1) x = lim[rnd() % 6];
+            if (rnd() & 1) y = lim[rnd() % 6];
+        }
         if (k && (rnd() & 3) == 0) y = g.pmem[(fi * 4 + (unsigned)k - 1) & MEM_MASK].sy;   /* horizontal */
         if (k && (rnd() & 3) == 0) x = g.pmem[(fi * 4 + (unsigned)k - 1) & MEM_MASK].sx;   /* equal x */
         g.pmem[vi].sx = (int16_t)x;
