@@ -1,11 +1,14 @@
 /*
  * Command engine (blitter).
  *
- * Implemented: STOP, LMMC, LMMV, LMMM, CMMC, CMMM, LINE, PSET (bitmap
- * coordinates).
+ * All sixteen commands: STOP, LMMC, LMMV, LMCM, LMMM, CMMC, CMMK, CMMM,
+ * BMXL, BMLX, BMLL, LINE, SRCH, POINT, PSET, ADVN. CMMK draws characters
+ * from a Kanji ROM, which a GFX9000 does not have: it ends at once (as in
+ * openMSX). PSET and ADVN move the pointer (DX, DY) by R#52's AXE/AXM and
+ * AYE/AYM (manual: "the drawing point can be shifted after executing the
+ * command"; openMSX leaves it). BMLL ignores DIX/DIY, as openMSX does.
  * P1/P2 use the coordinate systems openMSX implements (not documented).
- * TODO: LMCM, CMMK, BMXL, BMLX, BMLL, SRCH, POINT, ADVN, realistic
- *       execution timing.
+ * TODO: realistic execution timing.
  *
  * Commands run incrementally via v9990_cmd_step() so the bus loop on core1
  * stays responsive; there is no attempt at cycle-accurate speed yet.
@@ -139,8 +142,70 @@ V9990_HOT static unsigned read_pixel(const v9990_t *v, unsigned x, unsigned y) {
 
 V9990_HOT static void finish(v9990_t *v) {
     v->cmd.op = 0;
+    v->cmd.end_after_read = false;
+    v->cmd_read_latch = 0xFF;
     V9990_CLR_BITS(v->status, V9990_ST_CE | V9990_ST_TR);
     V9990_SET_BITS(v->int_flags, V9990_INT_CE);
+}
+
+V9990_HOT static bool advance_rect(v9990_t *v);
+
+/* Byte addresses of BMXL/BMLX/BMLL: SA in R#32, R#34, R#35; DA in R#36,
+ * R#38, R#39; NA in R#40, R#42, R#43 (bits 7-0, 15-8, 18-16). */
+V9990_HOT static uint32_t reg_addr(const v9990_t *v, unsigned lo) {
+    return (v->regs[lo] | ((uint32_t)v->regs[lo + 2] << 8) |
+            ((uint32_t)(v->regs[lo + 3] & 0x07u) << 16)) & V9990_VRAM_MASK;
+}
+
+/* A logical operation on a byte of 8/bpp dots; TP keeps the destination
+ * dots whose source dot is 0. */
+V9990_HOT static uint8_t logop_byte(uint8_t lop, uint8_t s, uint8_t d, unsigned bpp) {
+    uint8_t r = (uint8_t)logop(lop, s, d);
+    if (lop & V9990_LOP_TP) {
+        const unsigned m = (1u << bpp) - 1u;
+        for (unsigned sh = 0; sh < 8; sh += bpp)
+            if (!((s >> sh) & m)) r = (uint8_t)((r & ~(m << sh)) | (d & (m << sh)));
+    }
+    return r;
+}
+
+/* The next byte of LMCM (the source rectangle, dots packed as LMMC takes
+ * them, low byte first at 16bpp) or the second of POINT at 16bpp. */
+V9990_HOT static void read_next(v9990_t *v) {
+    v9990_cmd_state_t *c = &v->cmd;
+    const unsigned bpp = cmd_bpp(v);
+    if (bpp == 16) {
+        if (c->data_phase) {                    /* the pixel's high byte */
+            v->cmd_read_latch = (uint8_t)(c->data_word >> 8);
+            c->data_phase = 0;
+            if (c->op == V9990_CMD_POINT) c->end_after_read = true;
+            return;
+        }
+        c->data_word = (uint16_t)read_pixel(v, c->src_x, c->src_y);
+        v->cmd_read_latch = (uint8_t)c->data_word;
+        c->data_phase = 1;
+        if (!advance_rect(v)) c->remaining_y = 0;     /* done after the high byte */
+        return;
+    }
+    uint8_t d = 0;
+    for (unsigned shift = 8; shift >= bpp; shift -= bpp) {
+        d |= (uint8_t)(read_pixel(v, c->src_x, c->src_y) << (shift - bpp));
+        if (!advance_rect(v)) { c->end_after_read = true; break; }
+    }
+    v->cmd_read_latch = d;
+}
+
+/* After PSET / ADVN: R#52 AXE (bit 0) moves DX one dot, right or (AXM,
+ * bit 1) left; AYE (bit 2) moves DY, down or (AYM, bit 3) up. */
+V9990_HOT static void advance_pointer(v9990_t *v) {
+    const uint8_t op = v->regs[V9990_R_CMD_OP];
+    uint16_t dx = v->cmd.dx, dy = v->cmd.dy;
+    if (op & 0x01) dx = (uint16_t)((dx + ((op & 0x02) ? 0x7FFu : 1u)) & 0x7FFu);
+    if (op & 0x04) dy = (uint16_t)((dy + ((op & 0x08) ? 0xFFFu : 1u)) & 0xFFFu);
+    v->regs[V9990_R_CMD_DX0] = (uint8_t)dx;
+    v->regs[V9990_R_CMD_DX1] = (uint8_t)(dx >> 8);
+    v->regs[V9990_R_CMD_DY0] = (uint8_t)dy;
+    v->regs[V9990_R_CMD_DY1] = (uint8_t)(dy >> 8);
 }
 
 /* Advance the destination cursor of a rectangle command.
@@ -197,6 +262,8 @@ V9990_HOT void v9990_cmd_start(v9990_t *v) {
     c->remaining_y = c->ny;
     c->data_phase = 0;
     c->data_word = 0;
+    c->end_after_read = false;
+    v->cmd_read_latch = 0xFF;
 
     V9990_SET_BITS(v->status, V9990_ST_CE);
     V9990_CLR_BITS(v->status, V9990_ST_TR);
@@ -232,10 +299,46 @@ V9990_HOT void v9990_cmd_start(v9990_t *v) {
         break;
     case V9990_CMD_PSET:
         write_fc_bc(v, c->dx, c->dy, true);
+        advance_pointer(v);
         finish(v);
         break;
-    default:
-        /* TODO: unimplemented command, end it immediately */
+    case V9990_CMD_ADVN:
+        advance_pointer(v);
+        finish(v);
+        break;
+    case V9990_CMD_LMCM:                        /* VRAM -> CPU through P#2 */
+        read_next(v);
+        V9990_SET_BITS(v->status, V9990_ST_TR);
+        break;
+    case V9990_CMD_POINT:                       /* the colour code of (SX, SY) */
+        c->data_word = (uint16_t)read_pixel(v, c->sx, c->sy);
+        v->cmd_read_latch = (uint8_t)c->data_word;
+        if (cmd_bpp(v) == 16) c->data_phase = 1;    /* then the high byte */
+        else                  c->end_after_read = true;
+        V9990_SET_BITS(v->status, V9990_ST_TR);
+        break;
+    case V9990_CMD_SRCH:                        /* x: the dot being looked at */
+        c->x = c->sx;
+        c->y = c->sy;
+        break;
+    case V9990_CMD_BMXL:                        /* linear SA -> rectangle at DX, DY */
+        c->src_addr = reg_addr(v, V9990_R_CMD_SX0);
+        break;
+    case V9990_CMD_BMLX:                        /* rectangle at SX, SY -> linear DA */
+        c->dst_addr = reg_addr(v, V9990_R_CMD_DX0);
+        break;
+    case V9990_CMD_BMLL:                        /* linear SA -> linear DA, NA bytes */
+        c->src_addr = reg_addr(v, V9990_R_CMD_SX0);
+        c->dst_addr = reg_addr(v, V9990_R_CMD_DX0);
+        c->count = reg_addr(v, V9990_R_CMD_NX0);
+        if (c->count == 0) c->count = 0x80000;
+        if (cmd_bpp(v) == 16) {                 /* words: VRAM0 low, VRAM1 high byte */
+            c->src_addr >>= 1;
+            c->dst_addr >>= 1;
+            c->count >>= 1;
+        }
+        break;
+    default:                                    /* CMMK: no Kanji ROM */
         finish(v);
         break;
     }
@@ -288,6 +391,100 @@ V9990_HOT bool v9990_cmd_step(v9990_t *v, unsigned budget) {
             }
         }
     }
+    if (v->cmd.op == V9990_CMD_SRCH) {
+        v9990_cmd_state_t *c = &v->cmd;
+        const uint16_t tx = (v->regs[V9990_R_CMD_ARG] & V9990_ARG_DIX) ? 0xFFFFu : 1u;
+        const bool neq = (v->regs[V9990_R_CMD_ARG] & V9990_ARG_NEQ) != 0;
+        const uint16_t fc = reg16(v, V9990_R_CMD_FC0);
+        const unsigned width = cmd_width(v);
+        while (budget--) {
+            /* found: the border colour (NEQ: any other colour) at x */
+            bool eq = read_pixel(v, c->x, c->y) == color_at(v, c->x, c->y, fc);
+            bool found = eq != neq;
+            if (!found) c->x = (uint16_t)(c->x + tx);
+            if (found || (c->x & width)) {
+                if (found) V9990_SET_BITS(v->status, V9990_ST_BD);
+                else       V9990_CLR_BITS(v->status, V9990_ST_BD);
+                v->regs[V9990_R_CMD_BX0] = (uint8_t)c->x;
+                v->regs[V9990_R_CMD_BX1] = (uint8_t)((c->x >> 8) & 0x07);
+                finish(v);
+                return false;
+            }
+        }
+    }
+    if (v->cmd.op == V9990_CMD_BMXL) {
+        v9990_cmd_state_t *c = &v->cmd;
+        const unsigned bpp = cmd_bpp(v);
+        while (budget--) {
+            if (bpp == 16) {
+                unsigned col = v9990_vram_read_bx(v, c->src_addr) |
+                               (v9990_vram_read_bx(v, (c->src_addr + 1) & V9990_VRAM_MASK) << 8);
+                c->src_addr = (c->src_addr + 2) & V9990_VRAM_MASK;
+                write_pixel(v, c->x, c->y, col);
+                if (!advance_rect(v)) { finish(v); return false; }
+                continue;
+            }
+            uint8_t d = v9990_vram_read_bx(v, c->src_addr);
+            c->src_addr = (c->src_addr + 1) & V9990_VRAM_MASK;
+            for (unsigned shift = 8; shift >= bpp; shift -= bpp) {
+                write_pixel(v, c->x, c->y, (d >> (shift - bpp)) & ((1u << bpp) - 1u));
+                if (!advance_rect(v)) { finish(v); return false; }
+            }
+        }
+    }
+    if (v->cmd.op == V9990_CMD_BMLX) {
+        v9990_cmd_state_t *c = &v->cmd;
+        const unsigned bpp = cmd_bpp(v);
+        while (budget--) {
+            if (bpp == 16) {
+                unsigned col = read_pixel(v, c->src_x, c->src_y);
+                v9990_vram_write_bx(v, c->dst_addr, (uint8_t)col);
+                v9990_vram_write_bx(v, (c->dst_addr + 1) & V9990_VRAM_MASK, (uint8_t)(col >> 8));
+                c->dst_addr = (c->dst_addr + 2) & V9990_VRAM_MASK;
+                if (!advance_rect(v)) { finish(v); return false; }
+                continue;
+            }
+            uint8_t d = 0;
+            bool done = false;
+            for (unsigned shift = 8; shift >= bpp; shift -= bpp) {
+                d |= (uint8_t)(read_pixel(v, c->src_x, c->src_y) << (shift - bpp));
+                if (!advance_rect(v)) { done = true; break; }
+            }
+            v9990_vram_write_bx(v, c->dst_addr, d);   /* the last byte too, zero-filled */
+            c->dst_addr = (c->dst_addr + 1) & V9990_VRAM_MASK;
+            if (done) { finish(v); return false; }
+        }
+    }
+    if (v->cmd.op == V9990_CMD_BMLL) {
+        v9990_cmd_state_t *c = &v->cmd;
+        const unsigned bpp = cmd_bpp(v);
+        const uint8_t lop = v->regs[V9990_R_CMD_LOP];
+        while (budget--) {
+            if (bpp == 16) {                    /* VRAM0 = low byte, VRAM1 = high */
+                uint8_t *s0 = v9990_vram_ptr(v, c->src_addr), *s1 = v9990_vram_ptr(v, c->src_addr + 0x40000u);
+                uint8_t *d0 = v9990_vram_ptr(v, c->dst_addr), *d1 = v9990_vram_ptr(v, c->dst_addr + 0x40000u);
+                uint16_t s = (uint16_t)(*s0 | (*s1 << 8)), d = (uint16_t)(*d0 | (*d1 << 8));
+                uint16_t r = d;
+                if (!((lop & V9990_LOP_TP) && s == 0)) r = (uint16_t)logop(lop, s, d);
+                uint16_t wm = reg16(v, V9990_R_CMD_WM0);
+                r = (uint16_t)((d & ~wm) | (r & wm));
+                *d0 = (uint8_t)r;
+                *d1 = (uint8_t)(r >> 8);
+                c->src_addr = (c->src_addr + 1) & 0x3FFFFu;
+                c->dst_addr = (c->dst_addr + 1) & 0x3FFFFu;
+            } else {                            /* bytes in the bitmap (Bx) layout */
+                uint8_t s = v9990_vram_read_bx(v, c->src_addr);
+                uint32_t phys = v9990_vram_transform_bx(c->dst_addr);
+                uint8_t *p = v9990_vram_ptr(v, phys);
+                uint8_t wm = v->regs[V9990_R_CMD_WM0 + ((phys & 0x40000u) ? 1 : 0)];
+                uint8_t r = logop_byte(lop, s, *p, bpp);
+                *p = (uint8_t)((*p & ~wm) | (r & wm));
+                c->src_addr = (c->src_addr + 1) & V9990_VRAM_MASK;
+                c->dst_addr = (c->dst_addr + 1) & V9990_VRAM_MASK;
+            }
+            if (--c->count == 0) { finish(v); return false; }
+        }
+    }
     if (v->cmd.op == V9990_CMD_CMMM) {
         while (budget--) {
             if (!v->cmd.bits_left) {
@@ -337,7 +534,20 @@ V9990_HOT void v9990_cmd_write_data(v9990_t *v, uint8_t data) {
     }
 }
 
+/* A read of P#2: the latched byte goes to the CPU (v9990_peek_port); the
+ * next one is latched, or the command ends after its last byte. */
 V9990_HOT uint8_t v9990_cmd_read_data(v9990_t *v) {
-    /* TODO: LMCM / POINT */
-    return v->cmd_read_latch;
+    uint8_t value = v->cmd_read_latch;
+    if (!(v->status & V9990_ST_TR)) return value;
+    if (v->cmd.op != V9990_CMD_LMCM && v->cmd.op != V9990_CMD_POINT) return value;
+    if (v->cmd.end_after_read) {
+        finish(v);
+        return value;
+    }
+    if (v->cmd.op == V9990_CMD_LMCM && v->cmd.data_phase == 0 && v->cmd.remaining_y == 0) {
+        finish(v);                              /* 16bpp: that was the last high byte */
+        return value;
+    }
+    read_next(v);
+    return value;
 }

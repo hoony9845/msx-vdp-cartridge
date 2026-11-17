@@ -58,9 +58,12 @@ typedef struct {
     uint16_t remaining_x, remaining_y;
     uint16_t data_word;     /* LMMC/LMCM 16bpp byte assembly */
     uint8_t  data_phase;
-    uint32_t src_addr;      /* CMMM: linear source byte address */
+    uint32_t src_addr;      /* CMMM, BMXL, BMLL: linear source byte address */
+    uint32_t dst_addr;      /* BMLX, BMLL: linear destination byte address */
+    uint32_t count;         /* BMLL: bytes (16bpp: words) left */
     uint8_t  bits;          /* CMMM: current character byte */
     uint8_t  bits_left;     /* CMMM: bits left in `bits` */
+    bool     end_after_read;    /* LMCM, POINT: the latched byte is the last */
 } v9990_cmd_state_t;
 
 typedef struct v9990 {

@@ -123,10 +123,21 @@ static void write_reg(v9990_t *v, uint8_t reg, uint8_t data) {
     }
 }
 
+/* Registers that read back (openMSX's table, found on a real V9990 by
+ * writing 0xFF and reading): the rest read 0xFF. R#53/R#54 hold SRCH's
+ * border X (set by the command engine). */
+static const uint64_t reg_readable =
+    (1ull << 6) | (1ull << 7) | (1ull << 8) |                       /* screen mode, control */
+    (1ull << 9) | (1ull << 10) | (1ull << 11) | (1ull << 12) |      /* interrupt */
+    (1ull << 15) | (1ull << 16) |                                   /* backdrop, display adjust */
+    (0xFull << 17) | (0xFull << 21) |                               /* scroll A, B */
+    (1ull << 25) | (1ull << 26) | (1ull << 27) |                    /* sprite table, LCD, priority */
+    (1ull << 53) | (1ull << 54);                                    /* border X */
+
 static uint8_t read_reg(const v9990_t *v, uint8_t reg) {
     reg &= V9990_REGSEL_MASK;
-    /* TODO: model write-only registers and SRCH result registers. */
-    return v->regs[reg];
+    if (v->sys_ctrl & V9990_SYS_SRS) return 0xFF;       /* held in reset (openMSX) */
+    return ((reg_readable >> reg) & 1u) ? v->regs[reg] : 0xFF;
 }
 
 /* ------------------------------------------------------------------ */

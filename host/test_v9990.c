@@ -37,10 +37,16 @@ static void test_register_auto_increment(void) {
     CHECK_EQ(vdp.regs[15], 0x07);
     CHECK_EQ(vdp.regs[16], 0x00);
 
-    /* read back with auto increment */
+    /* read back with auto increment (R#17-R#18 read back; R#13-R#14 are
+     * write-only and read 0xFF) */
+    out(&vdp, 0x64, 17);
+    out(&vdp, 0x63, 0x33);
+    out(&vdp, 0x63, 0x44);
+    out(&vdp, 0x64, 17);
+    CHECK_EQ(in(&vdp, 0x63), 0x33);
+    CHECK_EQ(in(&vdp, 0x63), 0x44);
     out(&vdp, 0x64, 13);
-    CHECK_EQ(in(&vdp, 0x63), 0x11);
-    CHECK_EQ(in(&vdp, 0x63), 0x22);
+    CHECK_EQ(in(&vdp, 0x63), 0xFF);
 }
 
 static void test_vram_write_read(void) {
@@ -352,6 +358,163 @@ static void test_cmmc_cmmm(void) {
     CHECK_EQ(v9990_vram_read_bx(&vdp, 51 * 256 + 101), 0x22);
 }
 
+/* Command parameters R#32-R#51 (SX SY DX DY NX NY ARG LOP WM FC BC), then OP. */
+static void cmd(unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned nx, unsigned ny,
+                unsigned arg, unsigned lop, unsigned fc, unsigned op) {
+    unsigned p[20] = { sx & 255, sx >> 8, sy & 255, sy >> 8, dx & 255, dx >> 8, dy & 255, dy >> 8,
+                       nx & 255, nx >> 8, ny & 255, ny >> 8, arg, lop, 0xFF, 0xFF,
+                       fc & 255, fc >> 8, 0, 0 };
+    out(&vdp, 0x64, 32);
+    for (unsigned i = 0; i < 20; i++) out(&vdp, 0x63, (uint8_t)p[i]);
+    set_reg(&vdp, 52, (uint8_t)op);
+}
+
+/* 8bpp, 256 wide: dot (x, y) is linear byte y * 256 + x */
+static void dot8(unsigned x, unsigned y, uint8_t c) { v9990_vram_write_bx(&vdp, y * 256u + x, c); }
+
+static void test_lmcm_point(void) {
+    setup();
+    set_reg(&vdp, 6, 0x80 | 2);                    /* 256 wide, 8bpp */
+    for (unsigned i = 0; i < 6; i++) dot8(30 + i % 3, 40 + i / 3, (uint8_t)(0x10 + i));
+    cmd(30, 40, 0, 0, 3, 2, 0, 0x0C, 0, V9990_CMD_LMCM << 4);
+    for (unsigned i = 0; i < 6; i++) {
+        CHECK_EQ(in(&vdp, 0x65) & (V9990_ST_TR | V9990_ST_CE), V9990_ST_TR | V9990_ST_CE);
+        CHECK_EQ(in(&vdp, 0x62), 0x10 + i);
+    }
+    CHECK_EQ(in(&vdp, 0x65) & (V9990_ST_TR | V9990_ST_CE), 0);
+    CHECK_EQ(vdp.int_flags & V9990_INT_CE, V9990_INT_CE);
+
+    /* DIX: right to left */
+    cmd(32, 40, 0, 0, 3, 1, V9990_ARG_DIX, 0x0C, 0, V9990_CMD_LMCM << 4);
+    CHECK_EQ(in(&vdp, 0x62), 0x12);
+    CHECK_EQ(in(&vdp, 0x62), 0x11);
+    CHECK_EQ(in(&vdp, 0x62), 0x10);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, 0);
+
+    /* POINT: one dot's colour code, then done */
+    cmd(31, 41, 0, 0, 0, 0, 0, 0x0C, 0, V9990_CMD_POINT << 4);
+    CHECK_EQ(in(&vdp, 0x62), 0x14);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, 0);
+
+    /* 4bpp: two dots a byte, left dot high; 3 dots -> 2 bytes, the last half 0 */
+    set_reg(&vdp, 6, 0x80 | 1);                    /* 256 wide, 4bpp */
+    v9990_vram_write_bx(&vdp, 10 * 128 + 4, 0xAB);  /* dots 8, 9 */
+    v9990_vram_write_bx(&vdp, 10 * 128 + 5, 0xCD);  /* dots 10, 11 */
+    cmd(8, 10, 0, 0, 3, 1, 0, 0x0C, 0, V9990_CMD_LMCM << 4);
+    CHECK_EQ(in(&vdp, 0x62), 0xAB);
+    CHECK_EQ(in(&vdp, 0x62), 0xC0);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, 0);
+    cmd(9, 10, 0, 0, 0, 0, 0, 0x0C, 0, V9990_CMD_POINT << 4);
+    CHECK_EQ(in(&vdp, 0x62), 0x0B);
+
+    /* 16bpp: low byte, high byte; POINT likewise */
+    set_reg(&vdp, 6, 0x80 | 3);                    /* 256 wide, 16bpp */
+    v9990_vram_write_bx(&vdp, (5 * 256 + 7) * 2, 0x34);
+    v9990_vram_write_bx(&vdp, (5 * 256 + 7) * 2 + 1, 0x12);
+    cmd(7, 5, 0, 0, 0, 0, 0, 0x0C, 0, V9990_CMD_POINT << 4);
+    CHECK_EQ(in(&vdp, 0x62), 0x34);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, V9990_ST_CE);
+    CHECK_EQ(in(&vdp, 0x62), 0x12);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, 0);
+    cmd(7, 5, 0, 0, 1, 1, 0, 0x0C, 0, V9990_CMD_LMCM << 4);
+    CHECK_EQ(in(&vdp, 0x62), 0x34);
+    CHECK_EQ(in(&vdp, 0x62), 0x12);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, 0);
+}
+
+static void test_srch(void) {
+    setup();
+    set_reg(&vdp, 6, 0x80 | 2);                    /* 256 wide, 8bpp */
+    dot8(20, 3, 0x55);
+    cmd(5, 3, 0, 0, 0, 0, 0, 0, 0x5555, V9990_CMD_SRCH << 4);
+    run_cmd(&vdp);
+    CHECK_EQ(in(&vdp, 0x65) & (V9990_ST_BD | V9990_ST_CE), V9990_ST_BD);
+    out(&vdp, 0x64, 53);
+    CHECK_EQ(in(&vdp, 0x63), 20);
+    CHECK_EQ(in(&vdp, 0x63), 0);
+    /* leftwards from 40: found at 20 too */
+    cmd(40, 3, 0, 0, 0, 0, V9990_ARG_DIX, 0, 0x5555, V9990_CMD_SRCH << 4);
+    run_cmd(&vdp);
+    out(&vdp, 0x64, 53);
+    CHECK_EQ(in(&vdp, 0x63), 20);
+    /* NEQ: the first dot that is not 0 */
+    cmd(0, 3, 0, 0, 0, 0, V9990_ARG_NEQ, 0, 0x0000, V9990_CMD_SRCH << 4);
+    run_cmd(&vdp);
+    out(&vdp, 0x64, 53);
+    CHECK_EQ(in(&vdp, 0x63), 20);
+    /* not found: BD clear, BX past the edge (256) */
+    cmd(21, 3, 0, 0, 0, 0, 0, 0, 0x5555, V9990_CMD_SRCH << 4);
+    run_cmd(&vdp);
+    CHECK_EQ(in(&vdp, 0x65) & (V9990_ST_BD | V9990_ST_CE), 0);
+    out(&vdp, 0x64, 53);
+    CHECK_EQ(in(&vdp, 0x63), 0);
+    CHECK_EQ(in(&vdp, 0x63), 1);
+}
+
+static void test_bmxl_bmlx_bmll(void) {
+    setup();
+    set_reg(&vdp, 6, 0x80 | 2);                    /* 256 wide, 8bpp */
+    for (unsigned i = 0; i < 8; i++) v9990_vram_write_bx(&vdp, 0x20000 + i, (uint8_t)(0xA0 + i));
+    /* BMXL: SA 0x20000 (R#32, R#34, R#35) -> rectangle (10, 10) 4 x 2 */
+    cmd(0x00, 0x200, 10, 10, 4, 2, 0, 0x0C, 0, V9990_CMD_BMXL << 4);
+    run_cmd(&vdp);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, 0);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 10 * 256 + 10), 0xA0);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 10 * 256 + 13), 0xA3);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 11 * 256 + 10), 0xA4);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 11 * 256 + 13), 0xA7);
+    /* BMLX: rectangle back to DA 0x21000 (R#36, R#38, R#39) */
+    cmd(10, 10, 0x00, 0x210, 4, 2, 0, 0x0C, 0, V9990_CMD_BMLX << 4);
+    run_cmd(&vdp);
+    for (unsigned i = 0; i < 8; i++) CHECK_EQ(v9990_vram_read_bx(&vdp, 0x21000 + i), 0xA0 + i);
+    /* BMLL: 8 bytes 0x21000 -> 0x22000, NA in R#40, R#42, R#43 */
+    cmd(0x00, 0x210, 0x00, 0x220, 8, 0, 0, 0x0C, 0, V9990_CMD_BMLL << 4);
+    run_cmd(&vdp);
+    for (unsigned i = 0; i < 8; i++) CHECK_EQ(v9990_vram_read_bx(&vdp, 0x22000 + i), 0xA0 + i);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 0x22008), 0);
+    /* BMLL with TP: zero source bytes leave the destination */
+    v9990_vram_write_bx(&vdp, 0x23000, 0x00);
+    v9990_vram_write_bx(&vdp, 0x23001, 0x77);
+    v9990_vram_write_bx(&vdp, 0x24000, 0x11);
+    v9990_vram_write_bx(&vdp, 0x24001, 0x22);
+    cmd(0x00, 0x230, 0x00, 0x240, 2, 0, 0, 0x1C, 0, V9990_CMD_BMLL << 4);
+    run_cmd(&vdp);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 0x24000), 0x11);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 0x24001), 0x77);
+    /* 4bpp BMLX: 3 dots -> 2 bytes, the last half 0 */
+    set_reg(&vdp, 6, 0x80 | 1);
+    v9990_vram_write_bx(&vdp, 10 * 128 + 4, 0xAB);
+    v9990_vram_write_bx(&vdp, 10 * 128 + 5, 0xCD);
+    cmd(8, 10, 0x00, 0x250, 3, 1, 0, 0x0C, 0, V9990_CMD_BMLX << 4);
+    run_cmd(&vdp);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 0x25000), 0xAB);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 0x25001), 0xC0);
+}
+
+static void test_pset_advn(void) {
+    setup();
+    set_reg(&vdp, 6, 0x80 | 2);                    /* 256 wide, 8bpp */
+    /* PSET at (5, 6), then right one dot (AXE) */
+    cmd(0, 0, 5, 6, 0, 0, 0, 0x0C, 0x4242, (V9990_CMD_PSET << 4) | 0x01);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 6 * 256 + 5), 0x42);
+    CHECK_EQ(vdp.regs[36], 6);
+    CHECK_EQ(vdp.regs[38], 6);
+    /* PSET again at the moved pointer: R#52 only */
+    set_reg(&vdp, 52, (V9990_CMD_PSET << 4) | 0x01);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 6 * 256 + 6), 0x42);
+    CHECK_EQ(vdp.regs[36], 7);
+    /* ADVN: up one (AYE + AYM) and left one (AXE + AXM), nothing drawn */
+    set_reg(&vdp, 52, (V9990_CMD_ADVN << 4) | 0x0F);
+    CHECK_EQ(vdp.regs[36], 6);
+    CHECK_EQ(vdp.regs[38], 5);
+    CHECK_EQ(v9990_vram_read_bx(&vdp, 5 * 256 + 6), 0);
+    CHECK_EQ(in(&vdp, 0x65) & V9990_ST_CE, 0);
+    /* no shift bits: the pointer stays */
+    set_reg(&vdp, 52, (V9990_CMD_ADVN << 4));
+    CHECK_EQ(vdp.regs[36], 6);
+    CHECK_EQ(vdp.regs[38], 5);
+}
+
 int main(void) {
     struct { const char *name; void (*fn)(void); } tests[] = {
         { "register_auto_increment", test_register_auto_increment },
@@ -369,6 +532,10 @@ int main(void) {
         { "scroll_split",            test_scroll_split },
         { "lmmm",                    test_lmmm },
         { "cmmc_cmmm",               test_cmmc_cmmm },
+        { "lmcm_point",              test_lmcm_point },
+        { "srch",                    test_srch },
+        { "bmxl_bmlx_bmll",          test_bmxl_bmlx_bmll },
+        { "pset_advn",               test_pset_advn },
     };
     for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {
         int before = failures;
