@@ -320,8 +320,15 @@ V9990_HOT void v9990_video_vblank_end(v9990_t *v) {
 
 V9990_HOT void v9990_video_line_start(v9990_t *v, unsigned line) {
     v->cur_line = (uint16_t)line;
+    /* Line interrupt: at line R#10-R#11 (bits 9-0), or every line with
+     * R#11 bit 7; R#12 bits 3-0 delay it 64 * 2 (MCS: 3) clocks a step
+     * into the line (openMSX). Lines are the only time unit here: the
+     * delay is rounded down to whole lines of 1368 clocks. (HR is the
+     * video driver's.) */
     unsigned il = v->regs[V9990_R_INT_LINE_LO] |
                   ((v->regs[V9990_R_INT_LINE_HI] & 0x03u) << 8);
-    /* TODO: IEHM / horizontal position (R#12), HR status bit */
-    if (line == il) V9990_SET_BITS(v->int_flags, V9990_INT_HI);
+    unsigned ticks = (v->regs[V9990_R_INT_X] & 0x0Fu) * 64u *
+                     ((v->sys_ctrl & V9990_SYS_MCS) ? 3u : 2u);
+    if ((v->regs[V9990_R_INT_LINE_HI] & 0x80) || line == il + ticks / 1368u)
+        V9990_SET_BITS(v->int_flags, V9990_INT_HI);
 }

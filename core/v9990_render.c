@@ -7,8 +7,9 @@
  *   - bitmap modes BP2/BP4/BP6/BD8/BD16
  *   - X/Y scroll, R512/R256 roll, vertical scroll splits (writing the low
  *     byte of a Y scroll register restarts the layer at that line)
- * TODO: bitmap cursors, YJK/YUV, display adjust (R#16), hi-res BP2/BP4
- *       palette quirks, interlace (EO) line selection.
+ *   - bitmap cursors, YJK/YUV (with the palette dots of YJKP/YUVP)
+ *   - display adjust (R#16), hi-res (B4-B7) BP2/BP4 palettes, even/odd
+ *     pages without interlace (EO)
  *
  * References: Yamaha V9990 Application Manual chapters 8 and 10, and the
  * behaviour of openMSX (src/video/v9990) where the manual is silent.
@@ -79,6 +80,19 @@ V9990_HOT static unsigned image_y_a(const v9990_t *v, unsigned line, unsigned im
     unsigned mask = roll_mask(v, image_mask);
     unsigned base = scroll & ~mask & image_mask;
     unsigned y = (line - v->line_offset_a) & 0xFFFF;
+    return (base + ((y + scroll) & mask)) & image_mask;
+}
+
+/* Bitmap modes with even/odd pages (R#7 EO) but not interlaced: each
+ * field shows every other image line, the odd ones in the odd field (as
+ * openMSX). With IL too the picture already has both fields' lines. */
+V9990_HOT static unsigned image_y_bitmap(const v9990_t *v, unsigned line, unsigned image_mask) {
+    const uint8_t r7 = v->regs[V9990_R_SCREEN_MODE1];
+    if ((r7 & (V9990_R7_EO | V9990_R7_IL)) != V9990_R7_EO) return image_y_a(v, line, image_mask);
+    unsigned scroll = v->regs[V9990_R_SCROLL_AY_LO] | ((v->scroll_ay_high & 0x1Fu) << 8);
+    unsigned mask = roll_mask(v, image_mask);
+    unsigned base = scroll & ~mask & image_mask;
+    unsigned y = (((line - v->line_offset_a) & 0xFFFF) * 2u + ((v->status & V9990_ST_EO) ? 1u : 0u)) & 0xFFFF;
     return (base + ((y + scroll) & mask)) & image_mask;
 }
 
@@ -421,8 +435,13 @@ V9990_HOT static void render_bitmap(const v9990_t *v, unsigned line,
 
     unsigned scx = (v->regs[V9990_R_SCROLL_AX_HI] << 3) |
                    (v->regs[V9990_R_SCROLL_AX_LO] & 0x07u);
-    unsigned y = image_y_a(v, line, ih_mask);
+    unsigned y = image_y_bitmap(v, line, ih_mask);
     const uint32_t row_bytes = iw * bpp / 8u;
+    /* B4-B7 (hi-res): BP2/BP4 ignore PLT05 and take palette 0-31 for even
+     * dots, 32-63 for odd ones (openMSX, verified on a V9990) */
+    const v9990_display_mode_t dm = v9990_display_mode(v);
+    const bool hires = dm == V9990_MODE_B4 || dm == V9990_MODE_B5 || dm == V9990_MODE_B6 ||
+                       dm == V9990_MODE_B7;
     fetch_row(v, (uint32_t)y * row_bytes, row_bytes);
 
     const unsigned xmask = iw - 1u;
@@ -433,18 +452,20 @@ V9990_HOT static void render_bitmap(const v9990_t *v, unsigned line,
     switch (cm) {
     case V9990_COLOR_BP2: {
         /* leftmost pixel in the MSBs (manual 10.10) */
-        const uint16_t *p = pal + ((r13 & 0x0F) << 2);
+        const uint16_t *p = pal + (((hires ? (r13 & 0x07) : (r13 & 0x0F))) << 2);
+        const unsigned odd = hires ? 32u : 0u;
         for (unsigned i = 0, x = scx & xmask; i < src_w; i++, x = (x + 1u) & xmask) {
             unsigned off = x >> 2;
-            src_px[i] = p[(ROW_BYTE(off) >> (6 - ((x & 3) << 1))) & 3];
+            src_px[i] = p[((ROW_BYTE(off) >> (6 - ((x & 3) << 1))) & 3) | ((x & 1u) ? odd : 0u)];
         }
         break;
     }
     case V9990_COLOR_BP4: {
-        const uint16_t *p = pal + ((r13 & 0x0C) << 2);
+        const uint16_t *p = pal + ((hires ? (r13 & 0x04) : (r13 & 0x0C)) << 2);
+        const unsigned odd = hires ? 32u : 0u;
         for (unsigned i = 0, x = scx & xmask; i < src_w; i++, x = (x + 1u) & xmask) {
             unsigned off = x >> 1;
-            src_px[i] = p[(ROW_BYTE(off) >> (4 - ((x & 1) << 2))) & 15];
+            src_px[i] = p[((ROW_BYTE(off) >> (4 - ((x & 1) << 2))) & 15) | ((x & 1u) ? odd : 0u)];
         }
         break;
     }
@@ -456,8 +477,38 @@ V9990_HOT static void render_bitmap(const v9990_t *v, unsigned line,
         for (unsigned i = 0, x = scx & xmask; i < src_w; i++, x = (x + 1u) & xmask)
             src_px[i] = bd16_to_rgb565((uint16_t)(row_even[x] | (row_odd[x] << 8)));
         break;
+    case V9990_COLOR_BYJK:
+    case V9990_COLOR_BYJKP:
+    case V9990_COLOR_BYUV:
+    case V9990_COLOR_BYUVP: {
+        /* 4 dots of 4 bytes: Y in each byte's bits 7-3; the group's U from
+         * bytes 2-3, V from bytes 0-1 (6-bit signed, low bits first); YJK
+         * is YUV with G and B swapped. *P: a byte with bit 3 set is a
+         * palette dot (bits 7-4). As openMSX. */
+        const bool yjk = cm == V9990_COLOR_BYJK || cm == V9990_COLOR_BYJKP;
+        const bool palm = cm == V9990_COLOR_BYJKP || cm == V9990_COLOR_BYUVP;
+        unsigned x = scx & xmask, i = 0;
+        while (i < src_w) {
+            const unsigned g0 = x & ~3u;
+            const uint8_t d[4] = { ROW_BYTE(g0), ROW_BYTE(g0 + 1u), ROW_BYTE(g0 + 2u), ROW_BYTE(g0 + 3u) };
+            const int u = (d[2] & 7) + ((d[3] & 3) << 3) - ((d[3] & 4) << 3);
+            const int w = (d[0] & 7) + ((d[1] & 3) << 3) - ((d[1] & 4) << 3);
+            for (unsigned k = x & 3u; k < 4u && i < src_w; k++, i++) {
+                if (palm && (d[k] & 0x08)) { src_px[i] = pal[d[k] >> 4]; continue; }
+                const int yv = d[k] >> 3;
+                int r = yv + u, g = (5 * yv - 2 * u - w) / 4, b = yv + w;
+                r = r < 0 ? 0 : r > 31 ? 31 : r;
+                g = g < 0 ? 0 : g > 31 ? 31 : g;
+                b = b < 0 ? 0 : b > 31 ? 31 : b;
+                if (yjk) { int t = g; g = b; b = t; }
+                src_px[i] = bd16_to_rgb565((uint16_t)((g << 10) | (r << 5) | b));
+            }
+            x = (g0 + 4u) & xmask;
+        }
+        break;
+    }
     case V9990_COLOR_BD8:
-    default:    /* TODO: YJK / YUV */
+    default:
         if (!bd8_lut_ready) {
             for (unsigned c = 0; c < 256; c++) bd8_lut[c] = bd8_to_rgb565((uint8_t)c);
             bd8_lut_ready = true;
@@ -486,15 +537,27 @@ V9990_HOT void v9990_render_line(const v9990_t *v, unsigned line,
     const uint16_t backdrop = v9990_backdrop_rgb565(v);
     const v9990_display_mode_t mode = v9990_display_mode(v);
 
-    if (!(v->regs[V9990_R_CONTROL] & V9990_R8_DISP) ||
-        mode == V9990_MODE_STANDBY || line >= v9990_display_height(v)) {
+    /* R#16 display adjust (relative to its reset value 0): the top border
+     * grows by ((V ^ 7) - 8) lines and the left one by ((H ^ 7) - 8) * 8
+     * clock ticks (openMSX), 1024 ticks being the picture's width */
+    const uint8_t adj = v->regs[V9990_R_DISPLAY_ADJUST];
+    const int vshift = (int)((adj >> 4) ^ 7u) - 7;
+    const int hshift = ((int)((adj & 0x0Fu) ^ 7u) - 7) * 8;
+    const int src_line = (int)line - vshift;
+
+    if (!(v->regs[V9990_R_CONTROL] & V9990_R8_DISP) || mode == V9990_MODE_STANDBY ||
+        src_line < 0 || src_line >= (int)v9990_display_height(v)) {
         fill(out, out_width, backdrop);
         return;
     }
+    line = (unsigned)src_line;
 
     unsigned src_w = v9990_display_width(v);
     unsigned dst_w = scaled_width(src_w, out_width);
-    unsigned left = (out_width - dst_w) / 2;
+    int lft = (int)(out_width - dst_w) / 2 + hshift * (int)dst_w / 1024;
+    if (lft < 0) lft = 0;
+    if (lft > (int)(out_width - dst_w)) lft = (int)(out_width - dst_w);
+    unsigned left = (unsigned)lft;
 
     fill(out, left, backdrop);
     if (mode == V9990_MODE_P1 || mode == V9990_MODE_P2) {

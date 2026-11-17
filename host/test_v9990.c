@@ -96,6 +96,27 @@ static void test_interrupts(void) {
     CHECK_EQ(v9990_irq_pending(&vdp), 0);
     v9990_video_vblank_end(&vdp);
     CHECK_EQ(in(&vdp, 0x65) & V9990_ST_VR, 0);
+
+    /* line interrupt at line 100 (R#10-R#11) */
+    set_reg(&vdp, 9, V9990_INT_HI);
+    set_reg(&vdp, 10, 100);
+    set_reg(&vdp, 11, 0);
+    v9990_video_line_start(&vdp, 99);
+    CHECK_EQ(vdp.int_flags & V9990_INT_HI, 0);
+    v9990_video_line_start(&vdp, 100);
+    CHECK_EQ(vdp.int_flags & V9990_INT_HI, V9990_INT_HI);
+    out(&vdp, 0x66, V9990_INT_HI);
+    /* R#12 = 15: 15 * 64 * 2 clocks into the line, a line later */
+    set_reg(&vdp, 12, 15);
+    v9990_video_line_start(&vdp, 100);
+    CHECK_EQ(vdp.int_flags & V9990_INT_HI, 0);
+    v9990_video_line_start(&vdp, 101);
+    CHECK_EQ(vdp.int_flags & V9990_INT_HI, V9990_INT_HI);
+    out(&vdp, 0x66, V9990_INT_HI);
+    /* R#11 bit 7: every line */
+    set_reg(&vdp, 11, 0x80);
+    v9990_video_line_start(&vdp, 5);
+    CHECK_EQ(vdp.int_flags & V9990_INT_HI, V9990_INT_HI);
 }
 
 static void test_lmmv_bd16(void) {
@@ -142,6 +163,87 @@ static void test_render_bp4(void) {
     CHECK_EQ(line[64], 0xFFFF);
     CHECK_EQ(line[65], 0xFFFF);
     CHECK_EQ(line[66], 0);
+}
+
+static void test_render_yjk(void) {
+    setup();
+    set_reg(&vdp, 6, 0x80 | (0 << 2) | 2);     /* bitmap 256 wide, 8bpp: B1 */
+    set_reg(&vdp, 8, V9990_R8_DISP);
+    set_palette(&vdp, 8, 31, 31, 31);
+    /* Y = 16 in all four; U = 2 (bytes 2-3), V = 1 (bytes 0-1) */
+    set_vram_write_addr(&vdp, 0);
+    out(&vdp, 0x60, 0x81); out(&vdp, 0x60, 0x88); out(&vdp, 0x60, 0x82); out(&vdp, 0x60, 0x80);
+    /* R = Y + U = 18, (5Y - 2U - V) / 4 = 18, Y + V = 17 */
+    const uint16_t yuv = (uint16_t)((18 << 11) | (18 << 6) | (1 << 5) | 17);
+    const uint16_t yjk = (uint16_t)((18 << 11) | (17 << 6) | (1 << 5) | 18);   /* G, B swapped */
+    uint16_t line[640];
+    static const uint8_t r13[4] = { 0x80, 0xA0, 0xC0, 0xE0 };    /* YJK, YJKP, YUV, YUVP */
+    for (unsigned m = 0; m < 4; m++) {
+        set_reg(&vdp, 13, r13[m]);
+        v9990_render_line(&vdp, 0, line, 640);
+        uint16_t c = m < 2 ? yjk : yuv;
+        CHECK_EQ(line[64], c);
+        CHECK_EQ(line[65], c);
+        /* byte 1 = 0x88: a palette dot (8) in *P, else Y = 17: R 19, G 20, B 18 */
+        uint16_t c1 = m < 2 ? (uint16_t)((19 << 11) | (18 << 6) | (1 << 5) | 20)
+                            : (uint16_t)((19 << 11) | (20 << 6) | (1 << 5) | 18);
+        CHECK_EQ(line[66], (m & 1) ? 0xFFFF : c1);
+        CHECK_EQ(line[68], c);
+    }
+}
+
+static void test_display_adjust_eo_hires(void) {
+    uint16_t line[640];
+    /* R#16: V = 8 moves the picture 8 lines down, H = 15 one step right */
+    setup();
+    set_reg(&vdp, 6, 0x80 | (0 << 2) | 1);     /* B1, 4bpp */
+    set_reg(&vdp, 8, V9990_R8_DISP);
+    set_palette(&vdp, 3, 31, 31, 31);
+    set_vram_write_addr(&vdp, 0);
+    out(&vdp, 0x60, 0x30);                     /* line 0: dot 0 = 3 */
+    set_reg(&vdp, 16, 0x80);
+    v9990_render_line(&vdp, 8, line, 640);
+    CHECK_EQ(line[64], 0xFFFF);
+    v9990_render_line(&vdp, 0, line, 640);
+    CHECK_EQ(line[64], 0);                     /* border above the picture */
+    set_reg(&vdp, 16, 0x0F);                   /* H: ((15 ^ 7) - 7) * 8 = 8 ticks = 4 px */
+    v9990_render_line(&vdp, 0, line, 640);
+    CHECK_EQ(line[64], 0);
+    CHECK_EQ(line[68], 0xFFFF);
+
+    /* EO without IL: field 0 shows image line 2n, field 1 line 2n + 1 */
+    setup();
+    set_reg(&vdp, 6, 0x80 | (0 << 2) | 1);
+    set_reg(&vdp, 7, V9990_R7_EO);
+    set_reg(&vdp, 8, V9990_R8_DISP);
+    set_palette(&vdp, 3, 31, 31, 31);
+    set_vram_write_addr(&vdp, 3 * 128);        /* image line 3 */
+    out(&vdp, 0x60, 0x30);
+    vdp.status &= (uint8_t)~V9990_ST_EO;
+    v9990_render_line(&vdp, 1, line, 640);
+    CHECK_EQ(line[64], 0);                     /* line 2 */
+    vdp.status |= V9990_ST_EO;
+    v9990_render_line(&vdp, 1, line, 640);
+    CHECK_EQ(line[64], 0xFFFF);                /* line 3 */
+
+    /* hi-res B5 (640 shown, 1024 wide), BP4: odd dots take palette 32-63 */
+    setup();
+    set_reg(&vdp, 6, 0xA9);                    /* as display_modes' B5, CLRM 1 = BP4 */
+    set_reg(&vdp, 7, 0x01);
+    set_reg(&vdp, 8, V9990_R8_DISP);
+    CHECK_EQ(v9990_display_mode(&vdp), V9990_MODE_B5);
+    set_palette(&vdp, 1, 31, 31, 31);
+    set_palette(&vdp, 33, 31, 0, 0);
+    set_vram_write_addr(&vdp, 0);
+    out(&vdp, 0x60, 0x11);                     /* dots 0 and 1 = 1 */
+    v9990_render_line(&vdp, 0, line, 640);
+    CHECK_EQ(line[0], 0xFFFF);
+    CHECK_EQ(line[1], 0xF800);
+    set_reg(&vdp, 6, 0x81);                    /* B1 BP4: both palette 1 */
+    set_reg(&vdp, 7, 0x00);
+    v9990_render_line(&vdp, 0, line, 640);
+    CHECK_EQ(line[64], 0xFFFF);
+    CHECK_EQ(line[66], 0xFFFF);
 }
 
 static void vram_poke(v9990_t *v, uint32_t addr, uint8_t data) {
@@ -524,6 +626,8 @@ int main(void) {
         { "interrupts",              test_interrupts },
         { "lmmv_bd16",               test_lmmv_bd16 },
         { "render_bp4",              test_render_bp4 },
+        { "render_yjk",              test_render_yjk },
+        { "adjust_eo_hires",         test_display_adjust_eo_hires },
         { "display_modes",           test_display_modes },
         { "vram_pointer_latch",      test_vram_pointer_latch },
         { "render_p1_layers",        test_render_p1_layers },
