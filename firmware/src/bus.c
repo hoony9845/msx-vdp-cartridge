@@ -38,6 +38,7 @@ static_assert(PIN_D0 == PIN_A0 + 4, "data bus must follow A0-A3");
 #define V9968_CLK_PER_US 86u                    /* command engine: 85.9MHz */
 #define V9968_SLICE 512u                        /* max clocks per loop pass */
 #define V9990_CMD_SLICE 4u                      /* command engine units per loop pass */
+#define V9990_CMD_FAST_SLICE 1024u              /* fast paths: they yield on bus events */
 
 static uint32_t ring[RING_WORDS] __attribute__((aligned(1u << RING_BITS)));
 static volatile uint32_t read_table[16] __attribute__((aligned(64)));
@@ -173,6 +174,7 @@ void bus_init(vdp_chip_t c, void *vdp) {
     if (chip == VDP_CHIP_V9968) refresh_v9968();
     else                        refresh_v9990();
     v9968_cmd_watch = &dma_hw->ch[dma_ring].write_addr;
+    v9990_cmd_watch = &dma_hw->ch[dma_ring].write_addr;
 
     init_gpio();
     init_monitor_sm();
@@ -258,7 +260,7 @@ static void __not_in_flash_func(loop_v9990)(void) {
         /* small slices: bus events wait for the current slice to end */
         if (v9990->cmd.op) {
             uint32_t c0 = timer_hw->timerawl;
-            if (v9990_cmd_step(v9990, V9990_CMD_SLICE))
+            if (v9990_cmd_step(v9990, v9990_cmd_fast(v9990) ? V9990_CMD_FAST_SLICE : V9990_CMD_SLICE))
                 refresh_v9990();
             stats.cmd_us += timer_hw->timerawl - c0;
             stats.cmd_slices++;

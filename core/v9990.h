@@ -149,5 +149,14 @@ void v9990_cmd_start(v9990_t *v);
 V9990_HOT bool v9990_cmd_step(v9990_t *v, unsigned budget);
 void v9990_cmd_write_data(v9990_t *v, uint8_t data);
 uint8_t v9990_cmd_read_data(v9990_t *v);
+/* When set, v9990_cmd_step returns early (after a minimum run) once the
+ * word it points to changes: the firmware points it at the bus event
+ * ring's write position, so commands run in long slices yet events wait
+ * little. v9990_cmd_reference forces the per-dot code (tests). */
+extern const volatile uint32_t *v9990_cmd_watch;
+extern bool v9990_cmd_reference;
+/* The running command takes a fast path, which watches v9990_cmd_watch
+ * (the firmware hands it a long slice then). */
+bool v9990_cmd_fast(const v9990_t *v);
 
 #endif

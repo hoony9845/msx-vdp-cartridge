@@ -272,8 +272,49 @@ static void main_bench_v9968(void) {
            (unsigned long)cnt[3], (unsigned long)cnt[5], (unsigned long)cnt[6], (unsigned long)cnt[7]);
 }
 
+/* V9990 command engine speed on a copy of the VDP state, in Another
+ * World's mode (B2: MCS, 384 shown of a 512-wide BP4 image) and BD8:
+ * LMMM and LMMV of 256 x 64 off screen (image lines 1200-1663, which the
+ * running software may use: their contents are lost), stepped 4 pixels a
+ * call as core1 does. Result in ns a pixel. */
+static uint32_t __not_in_flash_func(bench_v9990_cmd)(uint8_t r6, unsigned op, unsigned sy, unsigned dy) {
+    v9990_t *b = &bench_vdp;
+    v9990_write_port(b, 4, 6);  v9990_write_port(b, 3, r6);
+    const unsigned p[16] = { 0, 0, sy & 255, sy >> 8, 0, 0, dy & 255, dy >> 8, 0, 1, 64, 0, 0, 0x0C, 0xFF, 0xFF };
+    v9990_write_port(b, 4, 32);
+    for (unsigned i = 0; i < 16; i++) v9990_write_port(b, 3, (uint8_t)p[i]);
+    v9990_write_port(b, 4, 52);
+    uint32_t t0 = timer_hw->timerawl;
+    v9990_write_port(b, 3, (uint8_t)(op << 4));
+    while (v9990_cmd_step(b, v9990_cmd_fast(b) ? 1024u : 4u)) {}     /* as core1 */
+    return (timer_hw->timerawl - t0) * 1000u / (256u * 64u);
+}
+
 void main_bench(void) {
     if (chip == VDP_CHIP_V9968) { main_bench_v9968(); return; }
+    if (chip == VDP_CHIP_V9990) {
+        uint32_t irq = save_and_disable_interrupts();
+        bench_vdp = v9990;
+        bench_vdp.sys_ctrl |= V9990_SYS_MCS;
+        uint32_t m4 = bench_v9990_cmd(0x95, V9990_CMD_LMMM, 1200, 1400);
+        uint32_t v4 = bench_v9990_cmd(0x95, V9990_CMD_LMMV, 0, 1600);
+        bench_vdp.sys_ctrl &= (uint8_t)~V9990_SYS_MCS;
+        uint32_t m8 = bench_v9990_cmd(0x96, V9990_CMD_LMMM, 600, 700);   /* BD8: 512-byte lines */
+        uint32_t v8 = bench_v9990_cmd(0x96, V9990_CMD_LMMV, 0, 800);
+        v9990_cmd_reference = true;                       /* the per-dot code, for comparison */
+        bench_vdp.sys_ctrl |= V9990_SYS_MCS;
+        uint32_t rm4 = bench_v9990_cmd(0x95, V9990_CMD_LMMM, 1200, 1400);
+        uint32_t rv4 = bench_v9990_cmd(0x95, V9990_CMD_LMMV, 0, 1600);
+        bench_vdp.sys_ctrl &= (uint8_t)~V9990_SYS_MCS;
+        uint32_t rm8 = bench_v9990_cmd(0x96, V9990_CMD_LMMM, 600, 700);
+        uint32_t rv8 = bench_v9990_cmd(0x96, V9990_CMD_LMMV, 0, 800);
+        v9990_cmd_reference = false;
+        restore_interrupts(irq);
+        printf("bench V9990 commands (ns/pixel, IRQs off): B2 BP4 LMMM %lu LMMV %lu; B3 BD8 LMMM %lu LMMV %lu "
+               "(per-dot code: %lu %lu; %lu %lu) (chip, sprites on: BP4 LMMM 373 LMMV 256; BD8 LMMM 652 LMMV 303)\n",
+               (unsigned long)m4, (unsigned long)v4, (unsigned long)m8, (unsigned long)v8,
+               (unsigned long)rm4, (unsigned long)rv4, (unsigned long)rm8, (unsigned long)rv8);
+    }
     if (chip != VDP_CHIP_V9990) { printf("bench: V9990/V9968 only\n"); return; }
     unsigned line = dvi_lines.src_height / 2;
     uint32_t irq = save_and_disable_interrupts();

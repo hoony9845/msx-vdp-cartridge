@@ -52,6 +52,11 @@ add_executable(v9968_dump_replay v9968_dump_replay.c)
 target_link_libraries(v9968_dump_replay v9990_core)
 target_compile_options(v9968_dump_replay PRIVATE -Wall -Wextra)
 
+add_executable(test_v9990_cmdfast test_v9990_cmdfast.c)
+target_link_libraries(test_v9990_cmdfast v9990_core)
+target_compile_options(test_v9990_cmdfast PRIVATE -Wall -Wextra)
+add_test(NAME test_v9990_cmdfast COMMAND test_v9990_cmdfast)
+
 add_executable(test_v9968_cmdfast test_v9968_cmdfast.c)
 target_link_libraries(test_v9968_cmdfast v9990_core)
 target_compile_options(test_v9968_cmdfast PRIVATE -Wall -Wextra)

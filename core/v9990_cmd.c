@@ -344,7 +344,116 @@ V9990_HOT void v9990_cmd_start(v9990_t *v) {
     }
 }
 
+const volatile uint32_t *v9990_cmd_watch;
+bool v9990_cmd_reference;
+
+/* LMMV / LMMM in the bitmap modes, the per-dot code's results with its
+ * per-command constants worked out once: a dot's byte (Bx layout: even
+ * bytes in VRAM0, odd in VRAM1), its bits, FC and WM by bank, the logical
+ * operation as masks. Returns the dots done, or less with the command
+ * finished. */
+#define FAST_YIELD_MIN 32u
+V9990_HOT static unsigned rect_fast(v9990_t *v, unsigned budget) {
+    v9990_cmd_state_t *c = &v->cmd;
+    const bool copy = c->op == V9990_CMD_LMMM;
+    const unsigned bpp = v9990_bpp(v), iw = v9990_image_width(v), xmask = iw - 1u;
+    const uint8_t lop = v->regs[V9990_R_CMD_LOP];
+    const bool tp = (lop & V9990_LOP_TP) != 0;
+    /* logop as masks: r = s&d&m8 | s&~d&m4 | ~s&d&m2 | ~s&~d&m1 */
+    const unsigned m8 = (lop & 8) ? 0xFFFFu : 0, m4 = (lop & 4) ? 0xFFFFu : 0;
+    const unsigned m2 = (lop & 2) ? 0xFFFFu : 0, m1 = (lop & 1) ? 0xFFFFu : 0;
+    const uint8_t wm[2] = { v->regs[V9990_R_CMD_WM0], v->regs[V9990_R_CMD_WM1] };
+    const uint16_t fc = reg16(v, V9990_R_CMD_FC0);
+    const uint8_t fcb[2] = { (uint8_t)fc, (uint8_t)(fc >> 8) };
+    const uint8_t arg = v->regs[V9990_R_CMD_ARG];
+    const uint16_t sdx = (arg & V9990_ARG_DIX) ? 0xFFFFu : 1u, sdy = (arg & V9990_ARG_DIY) ? 0xFFFFu : 1u;
+    uint8_t *const bank[2] = { v->vram, v->vram1 };
+    const volatile uint32_t *watch = v9990_cmd_watch;
+    const uint32_t watch_val = watch ? *watch : 0;
+    unsigned done = 0;
+#define LOGOP(s, d) ((((s) & (d)) & m8) | (((s) & ~(d)) & m4) | ((~(s) & (d)) & m2) | ((~(s) & ~(d)) & m1))
+
+    if (bpp == 16) {
+        while (done < budget) {
+            unsigned color;
+            if (copy) {
+                uint32_t sa = (((uint32_t)c->src_y * iw + (c->src_x & xmask)) * 2u) & V9990_VRAM_MASK;
+                color = bank[0][sa >> 1] | (bank[1][sa >> 1] << 8);
+            } else {
+                color = fc;
+            }
+            if (!(tp && color == 0)) {
+                uint32_t a = (((uint32_t)c->y * iw + (c->x & xmask)) * 2u) & V9990_VRAM_MASK;
+                for (unsigned i = 0; i < 2; i++) {
+                    uint8_t *p = bank[i] + (a >> 1);
+                    unsigned d = *p, s = (color >> (8 * i)) & 0xFFu;
+                    unsigned r = LOGOP(s, d);
+                    *p = (uint8_t)((d & ~wm[i]) | (r & wm[i]));
+                }
+            }
+            done++;
+            c->x = (uint16_t)(c->x + sdx);
+            c->src_x = (uint16_t)(c->src_x + sdx);
+            if (--c->remaining_x == 0) {
+                if (--c->remaining_y == 0) { finish(v); return done; }
+                c->remaining_x = c->nx;
+                c->x = c->dx;
+                c->src_x = c->sx;
+                c->y = (uint16_t)(c->y + sdy);
+                c->src_y = (uint16_t)(c->src_y + sdy);
+            }
+            if (watch && done >= FAST_YIELD_MIN && (done & 15u) == 0 && *watch != watch_val) break;
+        }
+        return done;
+    }
+
+    const unsigned pm = (1u << bpp) - 1u;
+    while (done < budget) {
+        uint32_t bit = ((uint32_t)c->y * iw + (c->x & xmask)) * bpp;
+        uint32_t a = (bit >> 3) & V9990_VRAM_MASK;
+        unsigned shift = 8u - bpp - (bit & 7u);
+        unsigned color;
+        if (copy) {
+            uint32_t sbit = ((uint32_t)c->src_y * iw + (c->src_x & xmask)) * bpp;
+            uint32_t sa = (sbit >> 3) & V9990_VRAM_MASK;
+            color = (bank[sa & 1u][sa >> 1] >> (8u - bpp - (sbit & 7u))) & pm;
+        } else {
+            color = (fcb[a & 1u] >> shift) & pm;
+        }
+        if (!(tp && color == 0)) {
+            uint8_t *p = bank[a & 1u] + (a >> 1);
+            unsigned d = *p, s = color << shift;
+            unsigned r = LOGOP(s, d);
+            unsigned mask = (pm << shift) & wm[a & 1u];
+            *p = (uint8_t)((d & ~mask) | (r & mask));
+        }
+        done++;
+        c->x = (uint16_t)(c->x + sdx);
+        c->src_x = (uint16_t)(c->src_x + sdx);
+        if (--c->remaining_x == 0) {
+            if (--c->remaining_y == 0) { finish(v); return done; }
+            c->remaining_x = c->nx;
+            c->x = c->dx;
+            c->src_x = c->sx;
+            c->y = (uint16_t)(c->y + sdy);
+            c->src_y = (uint16_t)(c->src_y + sdy);
+        }
+        if (watch && done >= FAST_YIELD_MIN && (done & 15u) == 0 && *watch != watch_val) break;
+    }
+#undef LOGOP
+    return done;
+}
+
+V9990_HOT bool v9990_cmd_fast(const v9990_t *v) {
+    return (v->cmd.op == V9990_CMD_LMMV || v->cmd.op == V9990_CMD_LMMM) && cmd_mode(v) >= 2 &&
+           !v9990_cmd_reference;
+}
+
 V9990_HOT bool v9990_cmd_step(v9990_t *v, unsigned budget) {
+    if (v9990_cmd_fast(v)) {
+        rect_fast(v, budget);
+        return v->cmd.op != 0;
+    }
     if (v->cmd.op == V9990_CMD_LMMM) {
         while (budget--) {
             /* write_pixel skips colour 0 when TP is set */
