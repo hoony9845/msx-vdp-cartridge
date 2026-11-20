@@ -332,15 +332,27 @@ V9990_HOT static void render_pattern_mode(const v9990_t *v, bool p2, unsigned li
 /* One bitmap row, fetched in physical order: the even bytes (bank 0)
  * then the odd bytes (bank 1). Largest row: 4096 bytes (2048 x 16bpp). */
 static uint8_t row_even[2048] __attribute__((aligned(4)));
-static uint8_t row_odd[2048] __attribute__((aligned(4)));
+static uint8_t row_odd_buf[2][2048] __attribute__((aligned(4)));
+static uint8_t *row_odd = row_odd_buf[0];       /* the other buffer receives the prefetch */
+static struct { uint32_t phys, len, frame; unsigned line; bool valid; } odd_pf;
 
-V9990_HOT static void fetch_row(const v9990_t *v, uint32_t row_start, uint32_t row_bytes) {
+V9990_HOT static void fetch_row(const v9990_t *v, unsigned line, uint32_t row_start,
+                                uint32_t row_bytes) {
     /* row_start is a multiple of row_bytes (>= 64), so both halves are
      * contiguous and word aligned in physical VRAM */
     uint32_t half = row_bytes / 2u, phys = (row_start & V9990_VRAM_MASK) >> 1;
     if (v->vram_fetch) {
         v->vram_fetch(v, phys, row_even, half);
-        v->vram_fetch(v, phys | 0x40000u, row_odd, half);
+        if (odd_pf.valid && odd_pf.line == line && odd_pf.frame == v->frame &&
+            odd_pf.phys == (phys | 0x40000u) && odd_pf.len == half) {
+            /* the VRAM1 half was started during the previous line: swap buffers */
+            v->vram_prefetch_wait(v);
+            row_odd = (row_odd == row_odd_buf[0]) ? row_odd_buf[1] : row_odd_buf[0];
+        } else {
+            if (odd_pf.valid) v->vram_prefetch_wait(v);
+            v->vram_fetch(v, phys | 0x40000u, row_odd, half);
+        }
+        odd_pf.valid = false;
     } else {
         memcpy(row_even, v->vram + phys, half);
         memcpy(row_odd, v->vram1 + phys, half);
@@ -501,12 +513,16 @@ V9990_HOT static void render_bitmap(const v9990_t *v, unsigned line,
     const v9990_display_mode_t dm = v9990_display_mode(v);
     const bool hires = dm == V9990_MODE_B4 || dm == V9990_MODE_B5 || dm == V9990_MODE_B6 ||
                        dm == V9990_MODE_B7;
-    fetch_row(v, (uint32_t)y * row_bytes, row_bytes);
-    if (v->vram_prefetch && line + 1u < v9990_display_height(v)) {
+    fetch_row(v, line, (uint32_t)y * row_bytes, row_bytes);
+    if (v->vram_prefetch && row_bytes / 2u <= sizeof row_odd_buf[0] &&
+        line + 1u < v9990_display_height(v)) {
         /* start the next line's VRAM1 half now, while this one is decoded */
         unsigned ny = image_y_bitmap(v, line + 1u, ih_mask);
-        v->vram_prefetch(v, (((uint32_t)ny * row_bytes) & V9990_VRAM_MASK) >> 1 | 0x40000u,
-                         row_bytes / 2u);
+        uint8_t *alt = (row_odd == row_odd_buf[0]) ? row_odd_buf[1] : row_odd_buf[0];
+        uint32_t phys = ((((uint32_t)ny * row_bytes) & V9990_VRAM_MASK) >> 1) | 0x40000u;
+        odd_pf.valid = v->vram_prefetch(v, phys, alt, row_bytes / 2u);
+        odd_pf.phys = phys; odd_pf.len = row_bytes / 2u;
+        odd_pf.line = line + 1u; odd_pf.frame = v->frame;
     }
 
     const unsigned xmask = iw - 1u;

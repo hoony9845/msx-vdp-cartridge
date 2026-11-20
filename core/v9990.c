@@ -27,9 +27,11 @@ void v9990_reset(v9990_t *v) {
     uint8_t *vram = v->vram, *vram1 = v->vram1;
     uint8_t sys = v->sys_ctrl;
     void (*fetch)(const struct v9990 *, uint32_t, uint8_t *, uint32_t) = v->vram_fetch;
-    void (*prefetch)(const struct v9990 *, uint32_t, uint32_t) = v->vram_prefetch;
+    bool (*prefetch)(const struct v9990 *, uint32_t, uint8_t *, uint32_t) = v->vram_prefetch;
+    void (*prefetch_wait)(const struct v9990 *) = v->vram_prefetch_wait;
     memset(v, 0, sizeof(*v));
     v->vram_prefetch = prefetch;
+    v->vram_prefetch_wait = prefetch_wait;
     v->vram = vram;
     v->vram1 = vram1;
     v->sys_ctrl = sys;
