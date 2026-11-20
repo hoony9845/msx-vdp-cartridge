@@ -21,5 +21,8 @@ void psram_diag(bool sweep);
  * once. Word aligned src/dst/len use the stream, anything else is copied. */
 void psram_stream_init(void);
 void psram_stream_read(void *dst, const void *src, uint32_t len);
+/* Asynchronous variant: start (false = not possible), then wait. */
+bool psram_stream_start(void *dst, const void *src, uint32_t len);
+void psram_stream_wait(void);
 
 #endif

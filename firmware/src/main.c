@@ -87,11 +87,36 @@ static void __not_in_flash_func(v9990_hblank)(void *v, bool on) {
     bus_refresh_status();
 }
 
-/* Renderer row fetch: one PSRAM burst instead of a cache miss per 8 bytes. */
+/* Renderer row fetch: one PSRAM burst instead of a cache miss per 8 bytes.
+ * The renderer hints the next line's VRAM1 row while it decodes this one;
+ * the burst then runs in the background into pf_buf. */
+static uint8_t pf_buf[2048] __attribute__((aligned(4)));
+static uint32_t pf_phys, pf_len;
+static bool pf_busy;                  /* a burst into pf_buf was started and not waited for */
+
+static void __not_in_flash_func(v9990_prefetch)(const v9990_t *v, uint32_t phys, uint32_t len) {
+    if (!(phys & 0x40000u) || len > sizeof pf_buf) return;
+    if (pf_busy) { psram_stream_wait(); pf_busy = false; }
+    pf_len = 0;
+    if (psram_stream_start(pf_buf, v->vram1 + (phys & 0x3FFFFu), len)) {
+        pf_phys = phys; pf_len = len; pf_busy = true;
+    }
+}
+
 static void __not_in_flash_func(v9990_fetch)(const v9990_t *v, uint32_t phys,
                                              uint8_t *dst, uint32_t len) {
-    if (phys & 0x40000u) psram_stream_read(dst, v->vram1 + (phys & 0x3FFFFu), len);
-    else {                                       /* VRAM0: SRAM (memcpy is in flash) */
+    if (phys & 0x40000u) {
+        if (pf_busy) { psram_stream_wait(); pf_busy = false; }
+        if (pf_len == len && pf_phys == phys) {      /* prefetched */
+            const uint32_t *s = (const uint32_t *)pf_buf;
+            uint32_t *d = (uint32_t *)dst;
+            for (uint32_t i = 0; i < len / 4u; i++) d[i] = s[i];
+            pf_len = 0;
+            return;
+        }
+        pf_len = 0;
+        psram_stream_read(dst, v->vram1 + (phys & 0x3FFFFu), len);
+    } else {                                     /* VRAM0: SRAM (memcpy is in flash) */
         const uint32_t *s = (const uint32_t *)(v->vram + phys);
         uint32_t *d = (uint32_t *)dst;
         for (uint32_t i = 0; i < len / 4u; i++) d[i] = s[i];
@@ -325,6 +350,7 @@ void main_bench(void) {
     bench_vdp.regs[V9990_R_CONTROL] = v9990.regs[V9990_R_CONTROL];
     bench_vdp.vram1 = bench_vdp.vram;                    /* all in SRAM: CPU time only */
     bench_vdp.vram_fetch = NULL;
+    bench_vdp.vram_prefetch = NULL;
     uint32_t sram = bench_render(&bench_vdp, line);
     bench_vdp = v9990;
     bench_vdp.regs[V9990_R_CONTROL] &= (uint8_t)~0x80;   /* display off: backdrop only */
@@ -515,6 +541,7 @@ int main(void) {
         v9990_init_banks(&v9990, v9968_vram, PSRAM_BASE);
         psram_stream_init();
         v9990.vram_fetch = v9990_fetch;
+        v9990.vram_prefetch = v9990_prefetch;
         TRACE("bus_init");
         bus_init(chip, &v9990);
         video = (dvi_vdp_t){ &v9990, v9990_height, v9990_vbs, v9990_vbe, v9990_line,

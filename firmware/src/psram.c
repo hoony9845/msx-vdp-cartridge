@@ -268,3 +268,24 @@ void __not_in_flash_func(psram_stream_read)(void *dst, const void *src, uint32_t
     xip_ctrl_hw->stream_ctr = len / 4u;
     dma_channel_wait_for_finish_blocking((uint)stream_dma);
 }
+
+/* Start the same burst without waiting; psram_stream_wait() completes it.
+ * Returns false (nothing started) when the arguments need the slow path. */
+bool __not_in_flash_func(psram_stream_start)(void *dst, const void *src, uint32_t len) {
+    uintptr_t a = (uintptr_t)src;
+    if (stream_dma < 0 || ((a | (uintptr_t)dst | len) & 3u) || len == 0) return false;
+    uintptr_t c0 = (a - XIP_BASE) & ~(uintptr_t)(XIP_CACHE_LINE_SIZE - 1u);
+    uintptr_t c1 = (a - XIP_BASE + len + XIP_CACHE_LINE_SIZE - 1u) &
+                   ~(uintptr_t)(XIP_CACHE_LINE_SIZE - 1u);
+    xip_cache_clean_range(c0, c1 - c0);
+    while (xip_ctrl_hw->stream_ctr) tight_loop_contents();
+    dma_channel_set_write_addr((uint)stream_dma, dst, false);
+    dma_channel_set_trans_count((uint)stream_dma, len / 4u, true);
+    xip_ctrl_hw->stream_addr = a;
+    xip_ctrl_hw->stream_ctr = len / 4u;
+    return true;
+}
+
+void __not_in_flash_func(psram_stream_wait)(void) {
+    dma_channel_wait_for_finish_blocking((uint)stream_dma);
+}

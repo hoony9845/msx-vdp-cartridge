@@ -103,6 +103,9 @@ typedef struct v9990 {
      * from `phys` to `dst`. The bitmap renderer fetches each row with it,
      * so a platform with slow VRAM can use bulk transfers. NULL = memcpy. */
     void (*vram_fetch)(const struct v9990 *v, uint32_t phys, uint8_t *dst, uint32_t len);
+    /* Optional hint (kept by v9990_reset): the next fetch will probably be
+     * `len` bytes from `phys`; the platform may start it in the background. */
+    void (*vram_prefetch)(const struct v9990 *v, uint32_t phys, uint32_t len);
 } v9990_t;
 
 /* ---- lifecycle ---- */

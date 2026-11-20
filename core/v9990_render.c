@@ -45,6 +45,10 @@ V9990_HOT uint16_t v9990_backdrop_rgb565(const v9990_t *v) {
 }
 
 V9990_HOT static void fill(uint16_t *out, unsigned n, uint16_t c) {
+    if ((uintptr_t)out & 2u) { if (!n) return; *out++ = c; n--; }
+    uint32_t *o = (uint32_t *)out, cc = (uint32_t)c * 0x10001u;
+    for (; n >= 4u; n -= 4u, o += 2) { o[0] = cc; o[1] = cc; }
+    out = (uint16_t *)o;
     while (n--) *out++ = c;
 }
 
@@ -57,7 +61,17 @@ V9990_HOT static unsigned scaled_width(unsigned src_w, unsigned out_w) {
 V9990_HOT static void scale_copy(const uint16_t *src, unsigned src_w, uint16_t *dst, unsigned dst_w) {
     uint32_t step = (uint32_t)(((uint64_t)src_w << 16) / dst_w);
     uint32_t pos = 0;
-    for (unsigned i = 0; i < dst_w; i++, pos += step)
+    unsigned i = 0;
+    if (!((uintptr_t)dst & 3u)) {
+        /* two output dots per 32-bit store, same positions as below */
+        for (; i + 4u <= dst_w; i += 4u) {
+            uint32_t p1 = pos + step, p2 = p1 + step, p3 = p2 + step;
+            ((uint32_t *)(dst + i))[0] = src[pos >> 16] | (uint32_t)src[p1 >> 16] << 16;
+            ((uint32_t *)(dst + i))[1] = src[p2 >> 16] | (uint32_t)src[p3 >> 16] << 16;
+            pos = p3 + step;
+        }
+    }
+    for (; i < dst_w; i++, pos += step)
         dst[i] = src[pos >> 16];
 }
 
@@ -380,6 +394,51 @@ V9990_HOT static uint16_t *decode_bytes(uint16_t *dst, const uint16_t *lut, uint
     return dst;
 }
 
+/* BP4: a byte holds two dots, the high nibble on the left. Byte 2k of the
+ * row is row_even[k] and byte 2k + 1 is row_odd[k], so dots 4h..4h+3 come
+ * from row_even[h] (4h, 4h+1) and row_odd[h] (4h+2, 4h+3). `pe` gives the
+ * colour of an even dot, `po` of an odd one (they differ in hi-res modes).
+ * Where the row does not wrap, 16 dots are decoded per pass from two 32-bit
+ * loads; each byte becomes one 32-bit store of two RGB565 dots. */
+V9990_HOT static void decode_bp4(uint16_t *dst, const uint16_t *pe, const uint16_t *po,
+                       unsigned scx, unsigned iw, unsigned src_w) {
+    uint32_t lo[16], hi[16];                    /* high nibble: even dot, low: odd dot */
+    for (unsigned n = 0; n < 16; n++) {
+        lo[n] = pe[n];
+        hi[n] = (uint32_t)po[n] << 16;
+    }
+    const unsigned xmask = iw - 1u;
+    unsigned x = scx & xmask, i = 0;
+    for (;;) {
+        /* single dots until x is a multiple of 16 (or the line is done) */
+        while (i < src_w && ((x & 15u) || (uintptr_t)(dst + i) & 3u || i + 16u > src_w ||
+                             x + 16u > iw)) {
+            unsigned off = x >> 1;
+            unsigned b = (off & 1u) ? row_odd[off >> 1] : row_even[off >> 1];
+            dst[i++] = (x & 1u) ? po[b & 15u] : pe[b >> 4];
+            x = (x + 1u) & xmask;
+        }
+        if (i >= src_w) return;
+        unsigned h = x >> 2;
+        do {
+            uint32_t e = *(const uint32_t *)&row_even[h];
+            uint32_t o = *(const uint32_t *)&row_odd[h];
+            uint32_t *d = (uint32_t *)(dst + i);
+            d[0] = lo[(e >> 4) & 15] | hi[e & 15];
+            d[1] = lo[(o >> 4) & 15] | hi[o & 15];
+            d[2] = lo[(e >> 12) & 15] | hi[(e >> 8) & 15];
+            d[3] = lo[(o >> 12) & 15] | hi[(o >> 8) & 15];
+            d[4] = lo[(e >> 20) & 15] | hi[(e >> 16) & 15];
+            d[5] = lo[(o >> 20) & 15] | hi[(o >> 16) & 15];
+            d[6] = lo[(e >> 28)] | hi[(e >> 24) & 15];
+            d[7] = lo[(o >> 28)] | hi[(o >> 24) & 15];
+            i += 16u;
+            x = (x + 16u) & xmask;
+            h = x >> 2;
+        } while (i + 16u <= src_w && x + 16u <= iw);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Bitmap cursors (two 32x32 1bpp, after openMSX's tests on a GFX9000)   */
 /* ------------------------------------------------------------------ */
@@ -443,6 +502,12 @@ V9990_HOT static void render_bitmap(const v9990_t *v, unsigned line,
     const bool hires = dm == V9990_MODE_B4 || dm == V9990_MODE_B5 || dm == V9990_MODE_B6 ||
                        dm == V9990_MODE_B7;
     fetch_row(v, (uint32_t)y * row_bytes, row_bytes);
+    if (v->vram_prefetch && line + 1u < v9990_display_height(v)) {
+        /* start the next line's VRAM1 half now, while this one is decoded */
+        unsigned ny = image_y_bitmap(v, line + 1u, ih_mask);
+        v->vram_prefetch(v, (((uint32_t)ny * row_bytes) & V9990_VRAM_MASK) >> 1 | 0x40000u,
+                         row_bytes / 2u);
+    }
 
     const unsigned xmask = iw - 1u;
     if (src_w > 2048u) src_w = 2048u;
@@ -462,11 +527,8 @@ V9990_HOT static void render_bitmap(const v9990_t *v, unsigned line,
     }
     case V9990_COLOR_BP4: {
         const uint16_t *p = pal + ((hires ? (r13 & 0x04) : (r13 & 0x0C)) << 2);
-        const unsigned odd = hires ? 32u : 0u;
-        for (unsigned i = 0, x = scx & xmask; i < src_w; i++, x = (x + 1u) & xmask) {
-            unsigned off = x >> 1;
-            src_px[i] = p[((ROW_BYTE(off) >> (4 - ((x & 1) << 2))) & 15) | ((x & 1u) ? odd : 0u)];
-        }
+        decode_bp4(direct ? out : src_px, p, p + (hires ? 32u : 0u), scx, iw, src_w);
+        if (direct) px = out;
         break;
     }
     case V9990_COLOR_BP6:
